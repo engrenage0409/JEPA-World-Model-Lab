@@ -107,6 +107,8 @@ def make_components(device):
                        device=str(device))
     psi, _, g, dec, _ = load_hwm(str(paths()["hwm"]), device)
     macro_flow = load_macro_flow(str(paths()["macro"]), device)
+    macro_flow[2]["n_samples"] = 16
+    macro_flow[2]["horizon"] = 1
     return task, env, low, psi, g, dec, macro_flow
 
 
@@ -256,8 +258,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--hidden", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--reach-radius", type=float, default=0.5)
-    parser.add_argument("--low-timeout", type=int, default=30)
+    parser.add_argument("--reach-radius", type=float, default=1.0)
+    parser.add_argument("--low-timeout", type=int, default=90)
     args = parser.parse_args()
     args.device = torch.device(args.device)
     os.environ.setdefault("MUJOCO_GL", "osmesa")
