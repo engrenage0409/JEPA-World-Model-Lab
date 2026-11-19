@@ -25,9 +25,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from visual_medium_bridge import (
-    ROOT, make_components, open_meta, plan_subgoal, teacher_latent,
-)
+try:
+    from .visual_medium_bridge import (
+        ROOT, make_components, open_meta, plan_subgoal, teacher_latent,
+    )
+except ImportError:
+    from visual_medium_bridge import (
+        ROOT, make_components, open_meta, plan_subgoal, teacher_latent,
+    )
 from jepa_robotics.envs import flatten_obs
 
 # Official JEPA-WM PointMaze pretraining used 5 actions per RGB frame.
