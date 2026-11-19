@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import sys
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -140,9 +141,11 @@ def run_controller(args, mode, bridge=None, meta=None):
         terminated = truncated = False
         info = {}
         step = 0
-        prev_image = np.asarray(env.render(), dtype=np.uint8)
+        initial_image = np.asarray(env.render(), dtype=np.uint8)
+        history = deque([initial_image] * (args.history + 1), maxlen=args.history + 1)
         while not (terminated or truncated):
             current_image = np.asarray(env.render(), dtype=np.uint8)
+            prev_image = history[0]
             if mode == "eval" and ep == 0 and args.video_out and step % 2 == 0:
                 video_frames.append(np.asarray(env.render(), dtype=np.uint8))
             if mode == "collect" and step % args.every == 0:
@@ -177,7 +180,7 @@ def run_controller(args, mode, bridge=None, meta=None):
                 elapsed, needs_replan = 0, False
             action = low.act(obs, subgoal)
             obs, _, terminated, truncated, info = env.step(action)
-            prev_image = current_image
+            history.append(current_image)
             step += 1
             elapsed += 1
         success = float(info.get("is_success", info.get("success", 0.0)))
@@ -277,6 +280,8 @@ def main():
     parser.add_argument("--video-out", default="outputs/visual_medium/visual_nav.mp4")
     parser.add_argument("--seed", type=int, default=20000)
     parser.add_argument("--every", type=int, default=4)
+    parser.add_argument("--history", type=int, default=4,
+                        help="Number of past simulation steps for the second visual frame")
     parser.add_argument("--epochs", type=int, default=35)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--hidden", type=int, default=512)
@@ -284,6 +289,8 @@ def main():
     parser.add_argument("--reach-radius", type=float, default=1.0)
     parser.add_argument("--low-timeout", type=int, default=90)
     args = parser.parse_args()
+    if args.history < 1:
+        parser.error("--history must be >= 1")
     args.device = torch.device(args.device)
     os.environ.setdefault("MUJOCO_GL", "osmesa")
     if args.mode == "collect":
