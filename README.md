@@ -1,111 +1,94 @@
-# JEPA World Model Lab — Masked Feature Prediction + Action-Conditioned Dynamics
+# JEPA World Model Lab — Hierarchical JEPA & Flow Matching for Long-Horizon Navigation
 
-A **lightweight, educational JEPA-inspired World Model** for experimentation with a modest GPU (e.g. RTX 5060 8GB). Reuses `world-model-lab` CarRacing-v3 episodes. **No pretrained JEPA 2 weights or trained experiment results included.**
+> **Validated on PointMaze Medium:** Four independently trained components (State JEPA, HWM, Macro Flow, Low-level Flow) reached **50/50 successful closed-loop episodes (100% on the tested seed block, seed 60000–60049)**. This is a state-based navigation system, **not pure RGB-only control**.
 
-## Implemented vs planned
+## Highlights
 
-| Track | Current implementation | Not implemented yet |
-|---|---|---|
-| Masked JEPA | small patch-token ViT, EMA target encoder, masked next-frame target feature predictor | official V-JEPA 2 pretraining, space-time tubelet masking |
-| Action JEPA | trainable action-conditioned pooled latent transition, multi-step rollout | official V-JEPA 2-AC, robot state/multi-view |
-| Planning | goal-embedding CEM demo for latent terminal matching | real reward-driven control or task success verification |
-| Evaluation | held-out episode latent MSE by future horizon, PCA trajectory visualization | linear probes, benchmark planning success, multi-seed ablations |
-
-**Important:** The first stage uses a spatial patch mask to predict selected **next-frame** features from the preceding context frame. It is a pedagogical approximation, not the published V-JEPA objective or architecture. The second stage learns dynamics on mean-pooled latent features; both are small enough to prototype without large video pretraining.
+- **Full four-stage training:** state-action trajectory collection, State JEPA world-model learning, goal-conditioned low-level Rectified Flow, 30-step Hierarchical World Model, and feasible goal-conditioned Macro Flow.
+- **Closed-loop MuJoCo PointMaze Medium evaluation:** 50/50 successes on an independently selected evaluation seed block for the fully self-trained pipeline. The earlier partial retraining (own HWM+Macro Flow, upstream state JEPA+walker) achieved **55/60 = 91.7%** across two blocks.
+- **Experimental visual track:** Meta JEPA-WM/DINO RGB feature adaptation and partial fine-tuning of an action-conditioned AdaLN predictor. Best held-out future latent MSE **0.043234**, compared with **0.044197** for static/identity prediction (2.18% improvement); state-assisted visual candidate ranking achieved **9/10** navigation successes. This **does not** demonstrate a pure-vision agent or an improvement over the stronger state-based baseline.
 
 ## Architecture
 
 ```text
-o_t   -> online patch ViT -> spatial tokens --masked predictor---> predicted target features
-o_t+1 -> EMA target ViT  -> future patch token targets  ---------> masked feature loss
-                             (no gradient through target encoder)
-
-frozen EMA image encoder(o_t) -> pooled z_t
-                   z_t + a_t -> ActionDynamics -> predicted z_t+1 -> ... -> z_t+H
-frozen EMA image encoder(o_t+1...t+H) ----------------------------> latent MSE
-                                                        |
-                                          CEM samples action sequences
-                                          to match a *supplied latent goal*
+Simulator state s_t [not RGB-only]
+        │
+        ▼
+State JEPA encoder E(s_t) → z_t
+        │
+        ▼
+High-level encoder ψ(z_t) → abstract zᴴ_t
+        │                         goal position
+        └──────────┬────────────────────┘
+                   ▼
+     Goal-conditioned Macro Flow
+       feasible 30-step macro proposals
+                   │
+                   ▼
+     HWM g(zᴴ_t, macro) → predicted abstract future
+                   │
+                   ▼
+      Subgoal decoder → reachable (x,y) subgoal
+                   │
+                   ▼
+ Goal-conditioned Low-level Rectified Flow
+         + state JEPA / raw state
+                   │
+                   ▼
+       MuJoCo PointMaze actions
 ```
 
-There is no image decoder. Visualization is a **latent-space plot**, not reconstructed images.
+**Two separate experimental conditions:** The self-trained four-stage result uses the state-based architecture above. The visual experiment adds an RGB encoder and action-conditioned predictor to an existing state-assisted controller; its 9/10 score is **not** the score of the four-stage self-trained model with visual control.
 
-## Project structure
+## Verified results
 
-```text
-jepa/
-  data.py            CarRacing NPZ parsing, episode split, temporal windows
-  models.py          Patch ViT, EMA masked predictor, action-conditioned MLP
-  planning.py        CEM optimization for a supplied latent goal
-scripts/
-  inspect_data.py    Verify NPZ arrays
-  train_masked.py    Train JEPA feature predictor and EMA teacher
-  train_action.py    Train dynamics with a frozen target encoder
-  evaluate.py        Per-horizon held-out latent prediction MSE
-  visualize.py       PCA latent-trajectory plot
-  plan_demo.py       Offline latent goal CEM example
-tests/               Data, gradients/shapes, CEM tests
-docs/                Original papers and staged research roadmap
-```
+| Condition | Model provenance | Evaluation | Success |
+|---|---|---|---|
+| Full four-stage reproduction | Own State JEPA + own Low-level Flow + own HWM + own Macro Flow; builds on open-source architecture | 50 episodes, seed 60000 | **50/50 (100%)** |
+| Partial high-level reproduction | Own HWM (2,000 steps) + own Macro Flow (1,000 steps); upstream state JEPA + low-level Flow | 10 episodes, seed 30000; 50 episodes, seed 50000 | **55/60 (91.7%)** combined |
+| State-assisted visual action reranking | Meta pretrained visual encoder + fine-tuned AdaLN predictor; upstream Mini state planner and controller | 10 episodes, seed 30000 | **9/10 (90%)** |
 
-## Setup on Windows PowerShell
+The 50/50 result is an **observed finite test set**, not a claim of guaranteed success on all tasks. This is an open-source-based reproduction and integration project, not an independently invented JEPA architecture.
 
-Use the working PyTorch environment and install dependencies:
+## Training & evaluation (WSL / CUDA)
 
-```powershell
+```bash
+conda activate jepa-wm311
 git clone https://github.com/engrenage0409/JEPA-World-Model-Lab.git
 cd JEPA-World-Model-Lab
-python -m pip install -r requirements.txt
-python -m pytest -q
 ```
 
-## Step 1: reuse CarRacing trajectories
+**Upstream dependencies are not vendored into this repository.** Obtain the compatible upstream [Mini-JEPA](https://github.com/WilliamZhang20/Mini-JEPA) source and place it at `external/mini-jepa/`, then install its dependencies in the project environment. The visual experiments separately require Meta's [JEPA-WM](https://github.com/facebookresearch/jepa-wms) source and relevant pretrained model weights at the expected paths. Scripts must not be run until their upstream imports, datasets and model weights are available. For reproducibility, record the upstream commit/version used alongside each run; the repository currently does not pin one.
 
-Copy `*.npz` from your local `world-model-lab` into `data/episodes/`. Each NPZ must contain:
+To collect state-action trajectories:
 
-```text
-observations  (T+1,96,96,3) uint8
-actions       (T,3)         float32
-rewards       (T,)          float32
-dones         (T,)          bool
+```bash
+python scripts/collect_mini_medium_episodes.py --steps 150000
 ```
 
-Do not upload private/large episode files to Git. The dataset split is done **by episode**, not frame, to prevent leakage.
+Run four-component independent training and evaluate 50 previously unused environment seeds:
 
-```powershell
-python -m scripts.inspect_data
+```bash
+bash scripts/run_mini_four_stage.sh all
 ```
 
-## Step 2: train JEPA-inspired feature encoder
+Run only the evaluation against the saved four-component weights:
 
-```powershell
-python -m scripts.train_masked --epochs 5 --steps 4 --batch-size 4 --mask-ratio 0.5
+```bash
+bash scripts/run_mini_four_stage.sh eval
 ```
 
-Output: `checkpoints/masked_jepa.pt`. Online encoder and predictor are optimized; target encoder gets EMA updates. Validation uses different episodes, but mask sampling is stochastic, so use fixed validation masks for rigorous comparisons. Also, guard against feature collapse before interpreting low masked loss as good learning.
+Default four-stage settings: State JEPA 10,000 steps; Low-level Flow 12,000; HWM 4,000; Macro Flow 5,000; Batch Size 128. For 8GB GPUs, try `BATCH=64` if CUDA runs out of memory. Initial training recipes are documented, but reported outcomes derive from the user's executed runs, not from CI reproduction on clean hardware.
 
-## Step 3: train action-conditioned latent dynamics
+**Large files:** `outputs/` and upstream vendor sources are gitignored. GitHub contains scripts and analysis, not saved .pt checkpoints, .npz trajectory data or .mp4 videos. Evaluation requires locally generated checkpoints.
 
-```powershell
-python -m scripts.train_action --epochs 5 --steps 4 --batch-size 4
-```
+## Documentation
 
-Output: `checkpoints/action_dynamics.pt`. The frozen EMA target encoder produces a latent per image; the dynamics model predicts next latents conditioned on continuous steering/gas/brake, then rolls forward without future image input.
+- [Final technical report — Hierarchical JEPA & Flow Matching](docs/HIERARCHICAL_JEPA_FINAL_REPORT.md)
+- [Four-stage reproduction and experimental provenance](docs/MINI_FOUR_STAGE_REPRODUCTION.md)
+- [Visual action-conditioned predictor design](docs/VISUAL_HIERARCHICAL_MEDIUM.md)
+- [Earlier teaching-oriented JEPA roadmap](docs/roadmap.md)
 
-## Step 4: evaluate, visualize and try latent-goal CEM
+## Legacy educational scaffold
 
-```powershell
-python -m scripts.evaluate
-python -m scripts.visualize
-python -m scripts.plan_demo
-```
-
-Outputs: `results/latent_eval.json`, `results/latent_trajectory.png`, and candidate action sequences from CEM.
-
-**CEM here is offline goal-latent optimization; it is NOT an autonomous CarRacing controller.** The goal feature is extracted from a held-out future observation solely as a demonstration target. Evaluate real control only after adding a reward/cost model, environment interaction and safety checks.
-
-## Research roadmap
-
-See [docs/roadmap.md](docs/roadmap.md) for proper video-time masking, JEPA2-AC token dynamics, strong no-action baselines, planning, and multi-seed ablations. Paper links and official implementations: [docs/reading-list.md](docs/reading-list.md).
-
-**Experiment status:** The code is a starter scaffold and has not yet been trained or benchmarked on the user's GPU. Do not claim official V-JEPA 2 reproduction or real-world planning results.
+This repository also retains a lightweight CarRacing-v3 JEPA-inspired teaching scaffold (`jepa/`, and scripts such as `train_masked.py`, `train_action.py`, `plan_demo.py`). It is **not** the evaluated PointMaze navigation implementation and should not be confused with official V-JEPA or JEPA-WM pretraining.
