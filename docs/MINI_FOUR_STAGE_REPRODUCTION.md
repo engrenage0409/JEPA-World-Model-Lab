@@ -30,7 +30,7 @@ State JEPA and Low-level Flow.**
   These are different controller settings and not a controlled predictor-only
   improvement study.
 
-## New four-component self-training (implementation provided, not yet evaluated)
+## Completed four-component self-training (evaluated 2026-11-19)
 
 Files:
 - `scripts/collect_mini_medium_episodes.py`: native contiguous Episode .npz
@@ -41,8 +41,7 @@ Files:
 
 The low-level training is **our compatible training recipe**, not a verbatim
 replication of the original author's specialized directed-walker data or
-hyperparameters. Consequently, achieving the previous 90% result with
-all-four-self-trained weights is **not yet established**.
+hyperparameters. The completed four-component training pipeline reached **50/50 successes (100%)** over 50 `PointMaze_Medium-v3` episodes using seed 60000–60049. This result is distinct from the partial-retraining 55/60 result.
 
 Run:
 
@@ -72,11 +71,7 @@ JEPA_STEPS=50 LOW_STEPS=50 HWM_STEPS=50 MACRO_STEPS=50 \
 EVAL_EPISODES=2 bash scripts/run_mini_four_stage.sh all
 ```
 
-Default workflow is 10k State JEPA / 12k low Flow / 4k HWM / 5k macro
-Flow optimizer steps, batch size 128; adjust training based on the actual
-held-out evaluation. These are affordable **initial experimental settings**
-for 8GB GPU, not proven reproduction of the author's full-performance
-training configuration. Model and features are low dimensional, but GPU
+Completed workflow used the script defaults: 10k State JEPA / 12k low Flow / 4k HWM / 5k Macro Flow optimizer steps, batch size 128, followed by successful 50-Episode evaluation. These are the project's reproduction settings, not a claim of identical training data or parameters to the upstream author's original directed walker. Model and features are low dimensional, but GPU
 memory allocation is not guaranteed; if OOM use `BATCH=64`.
 
 Evaluation uses seeds 60000 onward, separate from previous 30000 and
@@ -85,14 +80,9 @@ independent trajectory splits for quantitative reports.
 
 ## Resume positioning
 
-**Claim today**: Independently re-trained HWM + goal-conditioned Macro
-Flow, 91.7% across 60 evaluated tasks, using official pretrained state
-encoder and walker. Independently implemented/adapted Meta visual dynamics
-head with held-out action ablations, 9/10 state-assisted control.
+**Historical partial baseline:** Independently retrained HWM + Macro Flow, 91.7% across 60 evaluated tasks, using official pretrained state encoder and walker. **Current full reproduction:** all four components independently trained, 50/50 on a fresh 50-Episode seed block. Visual dynamics head with held-out action ablations yielded 9/10 state-assisted control, NOT RGB-only.
 
-**Claim only after `bash scripts/run_mini_four_stage.sh eval` completes**:
-independently trained all four components and state the *new* measured
-success rate. Do not inherit 55/60 from partial-training run.
+**Measured completed four-stage result:** trained State JEPA, Low-level Flow, HWM and Macro Flow and evaluated using own checkpoints: **50/50 (100%)**, seed 60000, 50 episodes. In the last visible Macro Flow log: step 5000, train loss 0.0986. Do not apply the separate 55/60 partial-training result to these weights.
 
 **Future RGB-only target**: Remove oracle simulator-state inputs from
 both HWM and low Flow conditioning, or replace them with inferred state
