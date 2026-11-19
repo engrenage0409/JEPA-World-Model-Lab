@@ -107,9 +107,20 @@ def normalize_actions(actions, mean, std):
 def action_predict(meta, ctx, actions, adapter):
     """Differentiable through adapter, frozen official Meta predictor."""
     a = adapter(actions)
-    prediction = meta.unroll(ctx, a.unsqueeze(0))
-    # Multimodal official model returns TensorDict[T,B,...], not a visual tensor.
-    return prediction["visual"][-1] if isinstance(ctx, dict) or hasattr(ctx, "keys") else prediction[-1]
+    # Official EncPredWM.unroll with a 2-frame context + one action has
+    # different time dimensions (2 visual frames vs 1 AdaLN action slot).
+    # Call the SAME pretrained Meta action-conditioned predictor directly
+    # on the latest visual/proprio token and exactly one 10-D action slot.
+    # This is an explicit one-step conditional predictor, not an unroll hack.
+    if not hasattr(ctx, "keys") or "proprio" not in ctx.keys():
+        raise ValueError("Meta PointMaze predictor requires visual + proprio context")
+    action_features = meta.model.encode_act(a[:, None, :])
+    pred_visual, _, _ = meta.model.forward_pred(
+        ctx["visual"][:, -1:],
+        action_features,
+        ctx["proprio"][:, -1:],
+    )
+    return pred_visual[:, -1]
 
 
 def select_low_chunks(low, obs, subgoal, count, device):
