@@ -62,3 +62,47 @@ python scripts/visual_medium_bridge.py eval \
 The real controller always uses **visual** subgoals. A separate Mini teacher proposes an alternate subgoal using a snapshot/restoration of Torch/NumPy RNG state to match sampling and avoid perturbing the real rollout. Results log high-latent MSE/cosine, subgoal distance and both subgoal coordinates, plus per-episode summaries. The teacher is evaluated at **the visual policy's encountered states**; this is not a separate teacher rollout and does not itself prove which subgoal is optimal.
 
 Interpretation: if high latents and chosen subgoals diverge immediately, improve representation alignment; if they remain close yet both fail, inspect macro planning, goal semantics and low-level tracking. Neither outcome should be presumed in advance.
+
+
+## V4: conservative Visual + State residual fusion
+
+This makes **a state-assisted multimodal planner**, not pure visual control.
+
+Fusion rule:
+
+    z_fused = z_state + alpha * clip_by_rms(z_visual - z_state, max_ratio * rms(z_state))
+
+The Mini state JEPA/HWM, macro-flow, low-level flow and the trained V2/V3 visual
+bridge remain frozen. No fresh training or data are necessary.
+
+From the repository root:
+
+~~~bash
+git pull origin visual-hierarchical-jepa
+python -m pytest -q tests/test_visual_fusion.py
+
+# Pure Mini state baseline: exact teacher latent at HWM input
+python scripts/visual_medium_bridge.py eval --device cuda --episodes 10 --seed 30000 \
+  --fusion-alpha 0 \
+  --video-out outputs/visual_medium/v4_state.mp4
+
+# Conservative residual mix using V2 bridge:
+python scripts/visual_medium_bridge.py eval --device cuda --episodes 10 --seed 30000 --history 4 \
+  --output outputs/visual_medium/visual_bridge.pt \
+  --fusion-alpha 0.15 --fusion-max-ratio 0.5 \
+  --video-out outputs/visual_medium/v4_fused.mp4
+~~~
+
+If your saved V2 checkpoint has a different name, supply that path instead.
+To test V3, supply visual_bridge_v3.pt. The default alpha=1 and practically
+uncapped max-ratio preserve the historical visual-only path for existing commands.
+
+Fusion is a **fixed user-controlled gate**, not a newly trained network. This
+protects the high-performing state baseline and tests whether the pretrained
+Meta visual representation can be added without destabilizing the hierarchy.
+If alpha is small, a strong score does not prove visual features added benefit.
+The original Meta action-conditioned predictor is not involved.
+
+Both eval runs use identical task seeds, but the flow policy and planner
+can consume stochastic samples; compare logged success rather than expecting
+bit-for-bit identical trajectories. All results require local testing.
