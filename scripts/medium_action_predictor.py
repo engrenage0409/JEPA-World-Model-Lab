@@ -265,14 +265,6 @@ def train(args):
     # Fail fast BEFORE several epochs of readout training if the official
     # Meta predictor interface / pretrained checkpoint is incompatible.
     with torch.no_grad():
-        first = int(train_ids[0])
-        probe_ctx = encode_images(
-            meta, data["context"][first:first+1], args.device,
-            proprio=data["context_proprio"][first:first+1],
-        )
-        probe_action = torch.as_tensor(
-            data["actions"][first:first+1], device=args.device, dtype=torch.float32,
-        )
         probe_prev = torch.as_tensor(
             data["actions"][prev_index[int(predictor_train_ids[0])]:prev_index[int(predictor_train_ids[0])]+1],
             device=args.device, dtype=torch.float32,
