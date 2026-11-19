@@ -189,7 +189,7 @@ task_specification:
   num_proprios: 1
   img_size: 224
   env:
-    with_target: true
+    with_target: false
     with_velocity: true
     freeze_rand_vec: false
 planner:
