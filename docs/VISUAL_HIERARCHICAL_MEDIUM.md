@@ -288,3 +288,75 @@ python scripts/medium_action_predictor.py train \
   --device cuda --head-epochs 4 --epochs 3 \
   --checkpoint outputs/medium_action/meta_action_adapter_temporal.pt
 ~~~
+
+
+## Medium dynamics partial Predictor fine-tuning (2026-11-19)
+
+Previous experiments still showed held-out uncalibrated Meta future-latent MSE
+around **4.306** vs identity/current-latent MSE **0.0442**. This is a large
+failure relative to a trivial reference. Freezing Meta Predictor and modifying
+only a small 10D action adapter did not resolve it.
+
+New independent training script:
+`scripts/finetune_medium_dynamics.py`.
+
+- **Frozen:** Meta visual DINO encoder, proprio encoder, Mini state JEPA/HWM,
+  Macro Flow and LowLevel Flow.
+- **Trainable:** last 1-2 Meta AdaLN Predictor blocks, its output projection
+  and normalization, existing 10D action adapter, and a zero-initialized
+  residual visual dynamics correction head. **This is actual partial backbone
+  fine-tuning, NOT LoRA**.
+- **Initialization:** predicts the current visual latent (identity), so it
+  starts near the verified good no-change baseline rather than an incorrect
+  raw future prediction. Action-conditioned Meta Predictor must learn
+  improvements over identity, not merely reproduce it.
+- **Existing data reused:** `paired_chunks.npz`; encoded visual/proprio
+  features cached in CPU fp16 once for all epochs.
+- **Supervision:** 5-step future visual latent MSE plus a low-weight frozen
+  spatial-visual-head future XY regression.
+- **Validation:** held-out episode groups, actual actions versus negated
+  actions versus current-token identity, XY distance, early stopping.
+- **Checkpoint:** only tuned AdaLN weights + small adapters + frozen XY head.
+  The existing `medium_action_predictor.py eval` automatically loads tuned
+  weights and applies the residual correction when `dynamics_finetuned` is
+  true.
+
+### Commands
+
+~~~bash
+cd ~/projects/JEPA-World-Model-Lab
+git pull origin visual-hierarchical-jepa
+python -m pytest tests/test_medium_action_predictor.py -q
+
+# Short dry-run: feature cache + predictor backward + held-out diagnostics.
+python scripts/finetune_medium_dynamics.py \
+  --device cuda --epochs 2 --max-train-steps 20 \
+  --checkpoint outputs/medium_action/meta_dynamics_smoke.pt
+
+# Full experiment using cached-source transitions and an existing spatial head.
+python scripts/finetune_medium_dynamics.py \
+  --device cuda --epochs 15 --patience 4 --last-blocks 1 \
+  --checkpoint outputs/medium_action/meta_dynamics_finetuned.pt
+
+# Only if held-out dynamics demonstrates improvement and action sensitivity:
+python scripts/medium_action_predictor.py eval \
+  --device cuda --episodes 10 --seed 30000 --planner meta \
+  --checkpoint outputs/medium_action/meta_dynamics_finetuned.pt
+
+# Matched state-only baseline:
+python scripts/medium_action_predictor.py eval \
+  --device cuda --episodes 10 --seed 30000 --planner flow
+~~~
+
+The training script expects the saved *spatial readout* checkpoint
+`outputs/medium_action/meta_action_adapter_spatial.pt` and the existing
+`paired_chunks.npz`; **no collection or position-head retraining needed**.
+
+A favorable experiment requires *both* `true < identity` and
+`true < negative` on a held-out set. Note these are necessary sanity
+checks rather than proof of consistent control improvements. If they fail,
+do not claim the Predictor works in Medium Maze or select actions with it.
+
+This is a first-pass implementation checked against upstream interfaces,
+but has **not yet been run on the user's WSL GPU**. On 8GB VRAM, start with
+`--last-blocks 1 --batch-size 2`. For OOM, use `--batch-size 1`.
