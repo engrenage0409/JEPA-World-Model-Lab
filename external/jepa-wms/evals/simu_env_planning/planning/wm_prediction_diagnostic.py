@@ -44,17 +44,27 @@ def evaluate_one_step_predictions(agent, cfg, observations, state_infos, action_
         z_real = agent.model.encode(next_obs.to(device).unsqueeze(0), act=False)
         actions = model_actions[:1].to(device=device, dtype=torch.float32).unsqueeze(1)
         z_prediction = agent.model.unroll(z0, act_suffix=actions)
+        z_zero = agent.model.unroll(z0, act_suffix=torch.zeros_like(actions))
         before = _visual(z0)[:, -1]
         predicted = _visual(z_prediction)[-1]
         actual = _visual(z_real)[:, -1]
+        predicted_zero = _visual(z_zero)[-1]
         target = _visual(agent.goal_state_enc)[:, -1]
         state0 = state_infos[step_start]
         state1 = state_infos[step_end]
+        # CEM may emit out-of-range normalized action components if max_norms
+        # are not configured. Physical MuJoCo motor controls are clipped [-1,1].
+        out_of_range_fraction = float((model_actions[:1].abs() > 1.0).float().mean().item())
         rows.append({
             "step_start": step_start,
             "action_norm_first": str(model_actions[0].tolist()),
             "pred_rmse": _rmse(predicted, actual),
             "static_rmse": _rmse(before, actual),
+            "zero_action_pred_rmse": _rmse(predicted_zero, actual),
+            "pred_latent_rms": float(predicted.float().square().mean().sqrt().item()),
+            "real_latent_rms": float(actual.float().square().mean().sqrt().item()),
+            "out_of_range_fraction": out_of_range_fraction,
+            "action_norm_abs_max": float(model_actions[:1].abs().max().item()),
             "pred_to_goal_rmse": _rmse(predicted, target),
             "actual_to_goal_rmse": _rmse(actual, target),
             "start_to_goal_rmse": _rmse(before, target),
@@ -72,7 +82,10 @@ def evaluate_one_step_predictions(agent, cfg, observations, state_infos, action_
     for r in rows:
         print(
             "[WM-DIAG] step={step_start} pred_rmse={pred_rmse:.4f} "
-            "static_rmse={static_rmse:.4f} real_delta=({real_dx:+.3f},{real_dy:+.3f}) "
+            "static_rmse={static_rmse:.4f} zero_pred_rmse={zero_action_pred_rmse:.4f} "
+            "out_range={out_of_range_fraction:.0%} max_act={action_norm_abs_max:.2f} "
+            "pred_rms={pred_latent_rms:.3f} real_rms={real_latent_rms:.3f} "
+            "real_delta=({real_dx:+.3f},{real_dy:+.3f}) "
             "goal_start={start_to_goal_rmse:.4f} goal_pred={pred_to_goal_rmse:.4f} "
             "goal_real={actual_to_goal_rmse:.4f}".format(**r),
             flush=True,
