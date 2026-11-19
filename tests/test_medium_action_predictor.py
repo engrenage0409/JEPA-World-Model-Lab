@@ -2,7 +2,7 @@
 import torch
 
 from scripts.medium_action_predictor import (
-    STRIDE, ActionAdapter, PositionHead, normalize_actions, previous_action_lookup,
+    STRIDE, ActionAdapter, PositionHead, ResidualDynamicsHead, normalize_actions, previous_action_lookup,
 )
 
 
@@ -80,3 +80,22 @@ def test_action_predict_passes_2_frame_context():
     assert result.shape == (1, 1, 16, 16, 384)
     result.sum().backward()
     assert adapter.delta.weight.grad is not None
+
+
+def test_residual_dynamics_is_identity_at_initialization():
+    head = ResidualDynamicsHead()
+    current = torch.randn(2, 1, 16, 16, 384)
+    raw = torch.randn_like(current) * 4
+    out = head(raw, current)
+    assert torch.allclose(out, current, atol=1e-6)
+
+
+def test_residual_dynamics_learns_from_target():
+    head = ResidualDynamicsHead()
+    current = torch.randn(2, 1, 4, 4, 384)
+    raw = torch.randn_like(current)
+    target = current + 0.1 * torch.randn_like(current)
+    loss = torch.nn.functional.mse_loss(head(raw, current), target)
+    loss.backward()
+    assert head.proj.weight.grad is not None
+    assert head.proj.weight.grad.abs().sum() > 0
