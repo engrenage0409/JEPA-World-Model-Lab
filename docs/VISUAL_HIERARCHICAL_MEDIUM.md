@@ -106,3 +106,88 @@ The original Meta action-conditioned predictor is not involved.
 Both eval runs use identical task seeds, but the flow policy and planner
 can consume stochastic samples; compare logged success rather than expecting
 bit-for-bit identical trajectories. All results require local testing.
+
+
+## Action-conditioned Medium Maze milestone (Meta Predictor actually used)
+
+The script `scripts/medium_action_predictor.py` adds an **independent**
+research pipeline. Unlike V2–V4 VisualBridge experiments, this pipeline
+actually calls `Meta EncPredWM.unroll(z_context, action_block)` and uses the
+predicted visual latent to **rank low-level Flow action candidates**.
+
+Architecture:
+
+1. **High-level:** frozen pretrained Mini state-JEPA -> HWM -> Macro Flow
+   outputs an XY subgoal on Medium Maze.
+2. **Low-level proposals:** pretrained Mini LowLevelFlow samples multiple
+   5-step, 2-D action chunks conditioned on the same subgoal.
+3. **Visual world model:** frozen pretrained Meta DINO visual encoder
+   encodes the last two RGB frames, 5 simulation steps apart. The **frozen
+   action-conditioned Meta AdaLN Predictor** rolls the visual latent forward
+   conditioned on each proposed action chunk (flattened 5x2 to 10D, with
+   Meta PointMaze mean/std normalization plus trained action adapter).
+4. **Learned readout:** a trained 2-D position head projects the predicted
+   visual latent to XY. Choose the action chunk whose predicted XY is
+   closest to the current HWM subgoal, execute 5 actions, then replan.
+5. **Supervision:** paired RGB, true executed 5x2 actions, and observed
+   XY labels are from the Mini controller's environment trajectories.
+   Only the small input action adapter and latent-to-XY head train.
+   Meta Encoder/Predictor and Mini hierarchy remain frozen.
+
+### Commands (run from repository root, WSL + jepa-wm311)
+
+~~~bash
+git pull origin visual-hierarchical-jepa
+python -m pytest tests/test_medium_action_predictor.py -q
+
+# Collect a limited dataset of 5-step RGB/action transitions.
+python scripts/medium_action_predictor.py collect \
+  --device cuda --episodes 25 --seed 20000 --max-pairs 600
+
+# Train and validate (frozen Meta Predictor, trainable 10D action adapter).
+python scripts/medium_action_predictor.py train \
+  --device cuda --head-epochs 4 --epochs 3
+
+# New actual model-based action selection.
+python scripts/medium_action_predictor.py eval \
+  --device cuda --episodes 10 --seed 30000 \
+  --planner meta --candidates 4
+
+# Matched-seed low-level Flow-only baseline.
+python scripts/medium_action_predictor.py eval \
+  --device cuda --episodes 10 --seed 30000 --planner flow
+~~~
+
+The training log includes held-out `valid_future_latent_mse`,
+`valid_future_xy_error`, and `valid_negated_action_latent_mse`
+(an action-conditioning diagnostic). Evaluation writes per-candidate scores,
+predicted XY and the selected index to
+`outputs/medium_action/decisions.jsonl`. Do not claim the method improves
+Medium-Maze success until both models have been evaluated on the **same
+task seeds**; also check that correct action conditioning beats ablated
+conditioning on the held-out transitions. The model-based planner may
+be slower than the state-only controller due to multiple visual model
+rollouts at every five-step replanning interval.
+
+**Scientific boundaries:** The navigation is **state-assisted**: Mini HWM
+and low-level proposals consume true simulator states. Meta Predictor is
+pretrained; the added action-input adapter and future-visual-state readout are
+independently trained on Medium Maze transitions. This is action-conditioned
+visual model-based reranking, **not** end-to-end pixel-only navigation and not
+end-to-end Meta backbone fine-tuning.
+
+**Implementation caution:** This is a first implementation requiring runtime
+validation with the exact WSL dependencies and checkpoints. In particular,
+Meta's pretraining used fixed 5-step action packing, a different underlying
+PointMaze data distribution, and its specific action normalization statistics.
+If the predicted visual transition is not action-sensitive or if XY readout
+error is large, do not interpret downstream success as an effect of Meta.
+
+### Suggested resume wording *after evaluation*
+
+"适配 Meta JEPA-WM 预训练视觉编码器和动作条件 AdaLN Predictor，
+针对 Medium Maze 构建 5-step 动作序列归一化与轻量适配训练，
+以未来视觉潜在状态预测和位置读出筛选 Mini-JEPA 分层控制候选动作；
+在相同测试种子上与纯状态 Flow 基线进行对照评估。"
+
+Quantitative performance numbers may be added only once confirmed.
