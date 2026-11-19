@@ -41,6 +41,9 @@ def main():
             _, goal_info = env.prepare(seed, goal)
             actual_goal = np.asarray(goal_info["state"])
             _, info = env.prepare(seed, start)
+            # prepare() is forwarded through TimeLimit without calling reset().
+            # Initialize its counter explicitly before taking any actions.
+            env.set_elapsed_steps(0)
             imageio.imwrite(out / "start.png", np.asarray(env.render()))
             assert actual_goal.shape == (4,), actual_goal.shape
             assert np.allclose(actual_goal[:2], goal[:2]), "Goal reset mismatch"
@@ -53,14 +56,14 @@ def main():
                 action = np.clip(
                     10.0 * (goal[:2] - state[:2]) - state[2:4], -1.0, 1.0
                 )
-                _, _, _, done, info = env.step(action)
+                _, _, terminated, truncated, info = env.step(action)
                 cur = np.asarray(info["state"], dtype=np.float64)
                 distance = float(np.linalg.norm(goal[:2] - cur[:2]))
                 trajectory.append((step + 1, *cur, *action, distance))
                 if distance < 0.5:
                     reached_at = step + 1
                     break
-                if done:
+                if terminated or truncated:
                     break
 
             imageio.imwrite(out / "final.png", np.asarray(env.render()))
