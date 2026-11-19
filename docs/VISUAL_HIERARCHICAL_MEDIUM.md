@@ -216,3 +216,36 @@ the original dataset did not save proprio states. The new training script
 now runs a small Predictor smoke test *before* the position-head epochs,
 so interface failures happen immediately instead of after several epochs.
 The earlier four head epochs were not checkpointed prior to the crash.
+
+
+### 2026-11-19: first full action training run and spatial position readout
+
+The first completed run produced:
+- held-out true-action future latent MSE: **4.3036**
+- held-out *negated*-action latent MSE: **4.2798** (lower / worse)
+- future XY error: **2.4871** simulator units
+
+Thus, despite successful forward and backward computations, action-conditioned
+forecasting has NOT shown value over the negated-action control. Do not cite
+the model as a successful predictor yet. We found the original position
+head averaged away all spatial token layout before its XY regression.
+
+The updated position head preserves pooled **4x4** spatial tokens, and train
+now prints:
+- `position_validation.mean_xy_error` on held-out episodes,
+- `valid_identity_latent_mse` as a no-dynamics baseline, and
+- `correct_minus_negated_mse` (negative is preferable).
+
+No new data collection is necessary for this change; the new head architecture
+requires training a new checkpoint (old heads are incompatible).
+
+~~~bash
+git pull origin visual-hierarchical-jepa
+python scripts/medium_action_predictor.py train \
+  --device cuda --head-epochs 4 --epochs 3 \
+  --checkpoint outputs/medium_action/meta_action_adapter_spatial.pt
+~~~
+
+Only evaluate navigation if the visual XY readout and action-conditioned
+transition diagnostics look credible. Avoid overclaiming predictor benefits
+from raw navigation success if action ablations remain non-discriminative.
