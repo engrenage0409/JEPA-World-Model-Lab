@@ -112,7 +112,7 @@ bit-for-bit identical trajectories. All results require local testing.
 
 The script `scripts/medium_action_predictor.py` adds an **independent**
 research pipeline. Unlike V2–V4 VisualBridge experiments, this pipeline
-actually calls `Meta EncPredWM.unroll(z_context, action_block)` and uses the
+actually calls `Meta VideoWM.forward_pred(visual_context, action_features, proprio_context)` and uses the
 predicted visual latent to **rank low-level Flow action candidates**.
 
 Architecture:
@@ -191,3 +191,28 @@ error is large, do not interpret downstream success as an effect of Meta.
 在相同测试种子上与纯状态 Flow 基线进行对照评估。"
 
 Quantitative performance numbers may be added only once confirmed.
+
+### 2026-11-19: AdaLN dimension fix
+
+An early training run failed at AdaLN LayerNorm: expected 400 channels,
+received 384. The pretrained PointMaze predictor concatenates **384 visual
+features + 16 encoded proprio features** for each patch. The corrected
+`collect` stage saves 4D simulator proprio state (x, y, vx, vy) for each
+input frame, and `train/eval` call `Meta.encode({"visual":..., "proprio":...})`
+so the official predictor receives its required additional 16 features.
+
+The first adaptation also exposed a potential temporal mismatch in the
+upstream `EncPredWM.unroll` API when used with a two-frame visual context
+and only one action block: AdaLN operates on matched visual/action time
+dimensions. Our explicit one-step `meta.model.forward_pred` uses the
+current visual/proprio embedding and a single 10D packed action; the
+Meta pretrained AdaLN Predictor remains involved in the differentiable
+forward path. The two-frame dataset remains available for future
+history-aware rollouts, but only the *current* frame is used for this
+one-step predictor.
+
+**Regenerate the previous transition dataset** after pulling this fix;
+the original dataset did not save proprio states. The new training script
+now runs a small Predictor smoke test *before* the position-head epochs,
+so interface failures happen immediately instead of after several epochs.
+The earlier four head epochs were not checkpointed prior to the crash.
