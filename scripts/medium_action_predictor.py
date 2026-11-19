@@ -88,6 +88,29 @@ class PositionHead(nn.Module):
         return self.net(z)
 
 
+class ResidualDynamicsHead(nn.Module):
+    """Calibrate raw Meta predictor output as a SMALL residual to current latent.
+
+    Identity initialization is intentional: on Medium Maze the no-change latent
+    predicts visual features far better than the uncalibrated pretrained output.
+    The Meta predictor must still learn action-sensitive residuals to improve.
+    """
+    def __init__(self, dim=384, residual_scale=0.1):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim, elementwise_affine=False)
+        self.proj = nn.Linear(dim, dim)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+        self.residual_scale = residual_scale
+
+    def forward(self, raw_prediction, current_visual):
+        if raw_prediction.shape != current_visual.shape:
+            raise ValueError(f"Residual shape mismatch: {raw_prediction.shape} vs {current_visual.shape}")
+        return current_visual + self.residual_scale * self.proj(
+            self.norm(raw_prediction - current_visual)
+        )
+
+
 def encode_images(meta, images, device, proprio=None):
     """Meta visual encoder; supply matching 4D proprio when using AdaLN Predictor.
 
@@ -117,7 +140,7 @@ def normalize_actions(actions, mean, std):
     return (actions - mean) / std
 
 
-def action_predict(meta, ctx, actions, adapter, previous_actions):
+def action_predict(meta, ctx, actions, adapter, previous_actions, corrector=None):
     """One-step forecast, with Meta's full 2-frame / 2-action-block context.
 
     ctx: RGB/proprio at t-5 and t; previous_actions: actions t-5:t;
@@ -134,7 +157,8 @@ def action_predict(meta, ctx, actions, adapter, previous_actions):
     pred_visual, _, _ = meta.model.forward_pred(
         ctx["visual"], action_features, ctx["proprio"]
     )
-    return pred_visual[:, -1]
+    raw = pred_visual[:, -1]
+    return corrector(raw, ctx["visual"][:, -1]) if corrector is not None else raw
 
 
 def previous_action_lookup(episodes):
@@ -399,6 +423,15 @@ def evaluate(args):
         if ck.get("position_head") != "spatial_4x4":
             raise ValueError("Checkpoint uses old global-average PositionHead; retrain with updated script")
         meta = open_meta(args.device)
+        corrector = None
+        if ck.get("dynamics_finetuned"):
+            by_name = dict(meta.model.predictor.named_parameters())
+            for name, value in ck["predictor_tuned"].items():
+                if name not in by_name or by_name[name].shape != value.shape:
+                    raise RuntimeError(f"Unexpected tuned Meta predictor parameter {name}")
+                by_name[name].data.copy_(value.to(by_name[name].device))
+            corrector = ResidualDynamicsHead().to(args.device).eval()
+            corrector.load_state_dict(ck["corrector"])
         adapter = ActionAdapter().to(args.device).eval()
         adapter.load_state_dict(ck["adapter"])
         head = PositionHead().to(args.device).eval()
@@ -407,7 +440,7 @@ def evaluate(args):
         mean = torch.tensor(mean, device=args.device)
         std = torch.tensor(std, device=args.device)
     else:
-        meta = adapter = head = None
+        meta = adapter = head = corrector = None
     _, env, low, psi, g, dec, (fnet, ddpm, config) = make_components(args.device)
     np.random.seed(args.seed); torch.manual_seed(args.seed)
     success = []
@@ -461,6 +494,7 @@ def evaluate(args):
                             pred = action_predict(
                                 meta, ctx, normalize_actions(a, mean, std),
                                 adapter, normalize_actions(past, mean, std),
+                                corrector=corrector,
                             )
                             predicted_xy = head(pred)[0].cpu().numpy()
                             predicted_positions.append(predicted_xy.tolist())
