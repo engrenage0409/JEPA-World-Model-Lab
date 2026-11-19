@@ -62,17 +62,30 @@ class ActionAdapter(nn.Module):
 
 
 class PositionHead(nn.Module):
-    """Visual latent readout to world XY (trained, never ground-truth at eval)."""
+    """Spatial 4x4 visual-token readout to world XY (no ground truth at eval).
+
+    Averaging the entire HxW token grid loses position-dependent information;
+    preserve a coarse spatial grid instead.
+    """
     def __init__(self, d=384):
         super().__init__()
-        self.net = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, 128),
-                                 nn.GELU(), nn.Linear(128, 2))
+        self.net = nn.Sequential(
+            nn.LayerNorm(d * 16),
+            nn.Linear(d * 16, 256),
+            nn.GELU(),
+            nn.Linear(256, 2),
+        )
 
     def forward(self, z):
         # z [B, 1, V, H, W, D] or [B, V, H, W, D]
         if z.ndim == 6:
             z = z[:, -1]
-        return self.net(z.mean(dim=(1, 2, 3)))
+        if z.ndim != 5:
+            raise ValueError(f"Expected [B,V,H,W,D], got {tuple(z.shape)}")
+        # Average over views only; keep spatial layout.
+        z = z.mean(dim=1).permute(0, 3, 1, 2)
+        z = F.adaptive_avg_pool2d(z, (4, 4)).flatten(1)
+        return self.net(z)
 
 
 def encode_images(meta, images, device, proprio=None):
@@ -261,6 +274,17 @@ def train(args):
             losses.append(loss.item())
         print(json.dumps({"stage": "position", "epoch": epoch+1,
                           "train_loss": float(np.mean(losses))}), flush=True)
+    # Hold-out evaluation of visual localization BEFORE dynamics adaptation.
+    head.eval()
+    with torch.no_grad():
+        position_errors = []
+        for i in valid_ids[:args.max_valid]:
+            z_val = encode_images(meta, data["context"][i:i+1, -1:], args.device)
+            xy_val = torch.as_tensor(data["xy"][i:i+1], device=args.device, dtype=torch.float32)
+            position_errors.append(torch.linalg.vector_norm(head(z_val) - xy_val, dim=-1).item())
+    print(json.dumps({"stage": "position_validation",
+                      "mean_xy_error": float(np.mean(position_errors)),
+                      "samples": len(position_errors)}), flush=True)
     for p in head.parameters():
         p.requires_grad_(False)
     head.eval()
@@ -290,7 +314,7 @@ def train(args):
             optim_adapter.step()
             losses.append(loss.item())
         adapter.eval()
-        val_pred, val_xy, val_base = [], [], []
+        val_pred, val_xy, val_base, val_no_move = [], [], [], []
         with torch.no_grad():
             for i in valid_ids[:args.max_valid]:
                 ctx = encode_images(meta, data["context"][i:i+1], args.device,
@@ -307,18 +331,24 @@ def train(args):
                 invalid_action = -actions
                 ablated = action_predict(meta, ctx, invalid_action, adapter)
                 val_base.append(F.mse_loss(ablated, future).item())
+                # Identity dynamics baseline: predict no latent change.
+                val_no_move.append(F.mse_loss(ctx["visual"][:, -1], future).item())
         metric = float(np.mean(val_pred))
         print(json.dumps({"stage": "action_predictor", "epoch": epoch+1,
                           "train_loss": float(np.mean(losses)),
                           "valid_future_latent_mse": metric,
                           "valid_future_xy_error": float(np.mean(val_xy)),
-                          "valid_negated_action_latent_mse": float(np.mean(val_base))}), flush=True)
+                          "valid_negated_action_latent_mse": float(np.mean(val_base)),
+                          "valid_identity_latent_mse": float(np.mean(val_no_move)),
+                          "correct_minus_negated_mse": metric - float(np.mean(val_base))}), flush=True)
         if metric < best:
             best = metric
             out = Path(args.checkpoint); out.parent.mkdir(parents=True, exist_ok=True)
             torch.save({"adapter": adapter.state_dict(), "head": head.state_dict(),
                         "validation_latent_mse": best,
                         "action_stride": STRIDE,
+                        "position_head": "spatial_4x4",
+                        "position_validation_error": float(np.mean(position_errors)),
                         "source": "Meta JEPA-WM pretrained PointMaze, frozen",
                         "method": "supervised XY readout + action-input adapter",
                         "train_episodes": np.unique(episodes[train_ids]).tolist(),
@@ -331,6 +361,8 @@ def evaluate(args):
         ck = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
         if ck["action_stride"] != STRIDE:
             raise ValueError("Action stride mismatch")
+        if ck.get("position_head") != "spatial_4x4":
+            raise ValueError("Checkpoint uses old global-average PositionHead; retrain with updated script")
         meta = open_meta(args.device)
         adapter = ActionAdapter().to(args.device).eval()
         adapter.load_state_dict(ck["adapter"])
