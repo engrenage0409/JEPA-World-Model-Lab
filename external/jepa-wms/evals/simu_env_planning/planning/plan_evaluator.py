@@ -558,7 +558,7 @@ class PlanEvaluator:
             make_video(frames_list, 30, agent_goal_video_path, obs_concat_channels=env.obs_concat_channels)
 
             # Visualization-only overlay; no change to model input.
-            if cfg.task_specification.task == "maze-medium":
+            if cfg.task_specification.task.startswith("maze-medium"):
                 try:
                     from evals.simu_env_planning.planning.goal_overlay import (
                         mark_goal_video,
