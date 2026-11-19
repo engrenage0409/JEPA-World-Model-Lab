@@ -7,3 +7,15 @@ data/
 checkpoints/
 results/
 wandb/
+
+# JEPA-WM local artifacts
+outputs/
+external/jepa-wms/outputs/
+external/jepa-wms/${JEPAWM_LOGS}/
+external/jepa-wms/**/*.pth
+external/jepa-wms/**/*.pth.tar
+external/jepa-wms/**/*.mp4
+external/jepa-wms/**/*.gif
+external/jepa-wms/*.before_*
+external/jepa-wms/**/*.before_*
+external/jepa-wms/**/*.yaml.bak
