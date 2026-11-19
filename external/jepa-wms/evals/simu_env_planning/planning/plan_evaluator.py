@@ -142,6 +142,8 @@ class PlanEvaluator:
         ep_obs_proprio_td_list = [td]
         infos_list = []
         actions = []
+        diagnostic_enabled = bool(self.cfg.meta.get("diagnose_wm", False)) and self.cfg.task_specification.task.startswith("maze-medium")
+        self._wm_diagnostic_action_records = []
         pbar = tqdm(
             desc="executing agent",
             total=env.max_steps(),
@@ -173,6 +175,8 @@ class PlanEvaluator:
                     self.prev_losses[-1],
                     plan_vis_path=plan_vis_path,
                 )
+            if diagnostic_enabled:
+                self._wm_diagnostic_action_records.append((env.elapsed_steps(), action.detach().cpu().clone()))
             action = rearrange(action.cpu(), "t (f d) -> (t f) d", d=env.action_dim)
             if self.cfg.planner.repeat_actskip:
                 action = action.repeat_interleave(self.agent.model.action_skip, dim=0)
@@ -537,6 +541,22 @@ class PlanEvaluator:
             agent_actor,
             preprocessor=agent.preprocessor,
         )
+        if cfg.meta.get("diagnose_wm", False) and cfg.task_specification.task.startswith("maze-medium"):
+            try:
+                from evals.simu_env_planning.planning.wm_prediction_diagnostic import (
+                    evaluate_one_step_predictions,
+                )
+                evaluate_one_step_predictions(
+                    agent,
+                    cfg,
+                    episode_obses,
+                    [info["state"]] + [x["state"] for x in infos],
+                    self._wm_diagnostic_action_records,
+                    work_dir / "wm_one_step_diagnostic.csv",
+                )
+            except Exception as exc:
+                log.warning(f"WM prediction diagnostic skipped: {exc}")
+
         if "droid" in cfg.task_specification.task:
             success_dist = 0.0
             # first 6 action dims are summable in time and should lead to same delta whatever the path taken if no obstacles
