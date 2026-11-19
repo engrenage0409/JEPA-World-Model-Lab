@@ -230,6 +230,24 @@ def train(args):
     std = torch.tensor(std, device=args.device)
     head = PositionHead().to(args.device)
     adapter = ActionAdapter().to(args.device)
+    # Fail fast BEFORE several epochs of readout training if the official
+    # Meta predictor interface / pretrained checkpoint is incompatible.
+    with torch.no_grad():
+        first = int(train_ids[0])
+        probe_ctx = encode_images(
+            meta, data["context"][first:first+1], args.device,
+            proprio=data["context_proprio"][first:first+1],
+        )
+        probe_action = torch.as_tensor(
+            data["actions"][first:first+1], device=args.device, dtype=torch.float32,
+        )
+        probe = action_predict(meta, probe_ctx,
+                               normalize_actions(probe_action, mean, std), adapter)
+        if probe.ndim != 5 or probe.shape[0] != 1 or probe.shape[-1] != 384:
+            raise RuntimeError(f"Unexpected Meta Predictor output: {tuple(probe.shape)}")
+    print(json.dumps({"stage": "predictor_smoke_passed",
+                      "output_shape": list(probe.shape)}), flush=True)
+    del probe_ctx, probe
     # Stage A: supervised visual position readout. Frozen DINO representation.
     optim_head = torch.optim.AdamW(head.parameters(), lr=args.lr)
     for epoch in range(args.head_epochs):
