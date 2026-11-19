@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import cv2
+import imageio.v2 as imageio
 import numpy as np
 
 
@@ -75,16 +76,11 @@ def mark_goal_video(video_stem, goal_visual):
         cap.release()
         raise ValueError("Goal marker lies outside video frame")
 
-    writer = cv2.VideoWriter(
-        str(dst),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (width, height),
+    # The original evaluation video uses H.264. Keep this exported overlay
+    # H.264 too, so it plays in browsers and VS Code without conversion.
+    writer = imageio.get_writer(
+        str(dst), fps=fps, codec="libx264", pixelformat="yuv420p"
     )
-
-    if not writer.isOpened():
-        cap.release()
-        raise RuntimeError(f"Cannot write {dst}")
 
     # Yellow five-point star, BGR color format.
     points = []
@@ -126,11 +122,11 @@ def mark_goal_video(video_stem, goal_visual):
                 0.48, (0, 225, 255), 1, cv2.LINE_AA
             )
 
-            writer.write(img)
+            writer.append_data(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
             frames += 1
     finally:
         cap.release()
-        writer.release()
+        writer.close()
 
     print(f"[GoalOverlay] pixel=({x},{y}), frames={frames}")
     print(f"[GoalOverlay] saved={dst}")
