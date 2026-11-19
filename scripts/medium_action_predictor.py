@@ -117,23 +117,37 @@ def normalize_actions(actions, mean, std):
     return (actions - mean) / std
 
 
-def action_predict(meta, ctx, actions, adapter):
-    """Differentiable through adapter, frozen official Meta predictor."""
-    a = adapter(actions)
-    # Official EncPredWM.unroll with a 2-frame context + one action has
-    # different time dimensions (2 visual frames vs 1 AdaLN action slot).
-    # Call the SAME pretrained Meta action-conditioned predictor directly
-    # on the latest visual/proprio token and exactly one 10-D action slot.
-    # This is an explicit one-step conditional predictor, not an unroll hack.
+def action_predict(meta, ctx, actions, adapter, previous_actions):
+    """One-step forecast, with Meta's full 2-frame / 2-action-block context.
+
+    ctx: RGB/proprio at t-5 and t; previous_actions: actions t-5:t;
+    actions: candidate actions t:t+5. Both are [B,5,2] *normalized*.
+    Meta's AdaLN predictor receives matching time axes [B,2,...] and
+    returns next-step prediction from its LAST token.
+    """
     if not hasattr(ctx, "keys") or "proprio" not in ctx.keys():
         raise ValueError("Meta PointMaze predictor requires visual + proprio context")
-    action_features = meta.model.encode_act(a[:, None, :])
+    if ctx["visual"].shape[1] != 2 or ctx["proprio"].shape[1] != 2:
+        raise ValueError("Meta trained context requires exactly 2 visual/proprio frames")
+    adapted = torch.stack((adapter(previous_actions), adapter(actions)), dim=1)
+    action_features = meta.model.encode_act(adapted)
     pred_visual, _, _ = meta.model.forward_pred(
-        ctx["visual"][:, -1:],
-        action_features,
-        ctx["proprio"][:, -1:],
+        ctx["visual"], action_features, ctx["proprio"]
     )
     return pred_visual[:, -1]
+
+
+def previous_action_lookup(episodes):
+    """Dataset is collected at contiguous five-step intervals per episode.
+
+    For row i the past actions [t-5:t] are the previous record's actions,
+    if within the same episode. First record of each episode has no history
+    and is excluded from predictor training/validation (but not XY head).
+    """
+    last = np.arange(len(episodes), dtype=np.int64) - 1
+    valid = (last >= 0)
+    valid[1:] &= episodes[1:] == episodes[:-1]
+    return last, valid
 
 
 def select_low_chunks(low, obs, subgoal, count, device):
@@ -235,6 +249,11 @@ def train(args):
     holdout = np.unique(episodes)[-max(1, len(np.unique(episodes)) // 5):]
     train_ids = np.flatnonzero(~np.isin(episodes, holdout))
     valid_ids = np.flatnonzero(np.isin(episodes, holdout))
+    prev_index, has_prev = previous_action_lookup(episodes)
+    predictor_train_ids = train_ids[has_prev[train_ids]]
+    predictor_valid_ids = valid_ids[has_prev[valid_ids]]
+    if not len(predictor_train_ids) or not len(predictor_valid_ids):
+        raise ValueError("No contiguous 5-step action history in both train and validation episodes")
     if not len(train_ids) or not len(valid_ids):
         raise RuntimeError("Empty episode-grouped train/validation split")
     meta = open_meta(args.device)
@@ -254,8 +273,22 @@ def train(args):
         probe_action = torch.as_tensor(
             data["actions"][first:first+1], device=args.device, dtype=torch.float32,
         )
+        probe_prev = torch.as_tensor(
+            data["actions"][prev_index[int(predictor_train_ids[0])]:prev_index[int(predictor_train_ids[0])]+1],
+            device=args.device, dtype=torch.float32,
+        )
+        # First smoke sample must have a valid previous action interval.
+        probe_i = int(predictor_train_ids[0])
+        probe_ctx = encode_images(
+            meta, data["context"][probe_i:probe_i+1], args.device,
+            proprio=data["context_proprio"][probe_i:probe_i+1],
+        )
+        probe_action = torch.as_tensor(
+            data["actions"][probe_i:probe_i+1], device=args.device, dtype=torch.float32,
+        )
         probe = action_predict(meta, probe_ctx,
-                               normalize_actions(probe_action, mean, std), adapter)
+                               normalize_actions(probe_action, mean, std), adapter,
+                               normalize_actions(probe_prev, mean, std))
         if probe.ndim != 5 or probe.shape[0] != 1 or probe.shape[-1] != 384:
             raise RuntimeError(f"Unexpected Meta Predictor output: {tuple(probe.shape)}")
     print(json.dumps({"stage": "predictor_smoke_passed",
@@ -295,7 +328,7 @@ def train(args):
     best = float("inf")
     for epoch in range(args.epochs):
         adapter.train()
-        order = np.random.permutation(train_ids)
+        order = np.random.permutation(predictor_train_ids)
         losses = []
         for i in order:
             ctx = encode_images(meta, data["context"][i:i+1], args.device,
@@ -304,7 +337,12 @@ def train(args):
             actions = torch.as_tensor(np.asarray(data["actions"][i:i+1]),
                                       device=args.device, dtype=torch.float32)
             actions = normalize_actions(actions, mean, std)
-            pred = action_predict(meta, ctx, actions, adapter)
+            past_actions = torch.as_tensor(
+                data["actions"][prev_index[i]:prev_index[i]+1],
+                device=args.device, dtype=torch.float32,
+            )
+            past_actions = normalize_actions(past_actions, mean, std)
+            pred = action_predict(meta, ctx, actions, adapter, past_actions)
             loss_latent = F.mse_loss(pred, future)
             loss_xy = F.smooth_l1_loss(head(pred), torch.as_tensor(
                 np.asarray(data["next_xy"][i:i+1]), device=args.device, dtype=torch.float32))
@@ -316,20 +354,25 @@ def train(args):
         adapter.eval()
         val_pred, val_xy, val_base, val_no_move = [], [], [], []
         with torch.no_grad():
-            for i in valid_ids[:args.max_valid]:
+            for i in predictor_valid_ids[:args.max_valid]:
                 ctx = encode_images(meta, data["context"][i:i+1], args.device,
                                     proprio=data["context_proprio"][i:i+1])
                 future = encode_images(meta, data["future"][i:i+1, None], args.device)[:, 0]
                 actions = torch.as_tensor(np.asarray(data["actions"][i:i+1]),
                                           device=args.device, dtype=torch.float32)
                 actions = normalize_actions(actions, mean, std)
-                z = action_predict(meta, ctx, actions, adapter)
+                past_actions = torch.as_tensor(
+                    data["actions"][prev_index[i]:prev_index[i]+1],
+                    device=args.device, dtype=torch.float32,
+                )
+                past_actions = normalize_actions(past_actions, mean, std)
+                z = action_predict(meta, ctx, actions, adapter, past_actions)
                 val_pred.append(F.mse_loss(z, future).item())
                 val_xy.append(torch.linalg.vector_norm(head(z) - torch.as_tensor(
                     np.asarray(data["next_xy"][i:i+1]), device=args.device, dtype=torch.float32), dim=-1).item())
                 # Identical observations, but shuffled actions as an action-conditioning ablation.
                 invalid_action = -actions
-                ablated = action_predict(meta, ctx, invalid_action, adapter)
+                ablated = action_predict(meta, ctx, invalid_action, adapter, past_actions)
                 val_base.append(F.mse_loss(ablated, future).item())
                 # Identity dynamics baseline: predict no latent change.
                 val_no_move.append(F.mse_loss(ctx["visual"][:, -1], future).item())
@@ -387,6 +430,8 @@ def evaluate(args):
             history = deque([prev] * (STRIDE+1), maxlen=STRIDE+1)
             proprio_history = deque([env_proprio(obs)] * (STRIDE+1), maxlen=STRIDE+1)
             queue = deque()
+            # Rolling actions executed during last 5 simulator steps.
+            action_history = deque([np.zeros(2, dtype=np.float32)] * STRIDE, maxlen=STRIDE)
             step, elapsed, need = 0, 0, True
             done = truncated = False
             info = {}
@@ -417,7 +462,14 @@ def evaluate(args):
                         for chunk in chunks:
                             a = torch.as_tensor(chunk[None], dtype=torch.float32,
                                                 device=args.device)
-                            pred = action_predict(meta, ctx, normalize_actions(a, mean, std), adapter)
+                            past = torch.as_tensor(
+                                np.stack(tuple(action_history))[None],
+                                device=args.device, dtype=torch.float32,
+                            )
+                            pred = action_predict(
+                                meta, ctx, normalize_actions(a, mean, std),
+                                adapter, normalize_actions(past, mean, std),
+                            )
                             predicted_xy = head(pred)[0].cpu().numpy()
                             predicted_positions.append(predicted_xy.tolist())
                             scores.append(float(np.linalg.norm(predicted_xy - subgoal)))
@@ -429,6 +481,7 @@ def evaluate(args):
                                       "subgoal": np.asarray(subgoal).tolist()})
                 action = queue.popleft() if args.planner == "meta" else low.act(obs, subgoal)
                 obs, _, done, truncated, info = env.step(action)
+                action_history.append(np.asarray(action, dtype=np.float32).copy())
                 history.append(np.asarray(env.render(), np.uint8).copy())
                 proprio_history.append(env_proprio(obs))
                 step += 1; elapsed += 1
