@@ -272,7 +272,7 @@ def run_controller(args, mode, bridge=None, meta=None):
         comparison_file.parent.mkdir(parents=True, exist_ok=True)
         with comparison_file.open("w", encoding="utf-8") as fh:
             for row in comparisons:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\\n")
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         # Per-episode statistics make it easier to locate where plans diverge.
         by_episode = {}
         for row in comparisons:
