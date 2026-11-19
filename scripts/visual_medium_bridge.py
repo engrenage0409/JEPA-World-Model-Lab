@@ -89,9 +89,13 @@ def meta_features(meta, frames: np.ndarray, device, batch_size=2):
         latent = meta.encode(tensor)
         if isinstance(latent, dict):
             latent = latent["visual"]
-        # Meta: [B,T,V,H,W,D]; average spatial, view and time dimensions.
-        feature = latent.reshape(latent.shape[0], -1, latent.shape[-1]).mean(dim=1)
-        outs.append(feature.cpu().float().numpy())
+        # Preserve maze location: Meta [B,T,V,H,W,D] -> spatial 4x4 grid.
+        # Pool only time and views, NEVER discard spatial coordinates.
+        if latent.ndim != 6:
+            raise ValueError(f"Expected Meta tokens [B,T,V,H,W,D], got {tuple(latent.shape)}")
+        spatial = latent.float().mean(dim=(1, 2)).permute(0, 3, 1, 2)
+        feature = F.adaptive_avg_pool2d(spatial, (4, 4)).flatten(1)
+        outs.append(feature.cpu().numpy())
     return np.concatenate(outs, axis=0)
 
 
@@ -120,7 +124,7 @@ def teacher_latent(low, obs, device):
 
 def run_controller(args, mode, bridge=None, meta=None):
     task, env, low, psi, g, dec, (fnet, ddpm, config) = make_components(args.device)
-    frames, labels, episode_ids, successes = [], [], [], []
+    frames, previous_frames, labels, episode_ids, successes = [], [], [], [], []
     video_frames = []
     # The flow sampler is stochastic. Seeds are fixed for repeatable evaluation.
     np.random.seed(args.seed)
@@ -136,24 +140,26 @@ def run_controller(args, mode, bridge=None, meta=None):
         terminated = truncated = False
         info = {}
         step = 0
+        prev_image = np.asarray(env.render(), dtype=np.uint8)
         while not (terminated or truncated):
+            current_image = np.asarray(env.render(), dtype=np.uint8)
             if mode == "eval" and ep == 0 and args.video_out and step % 2 == 0:
                 video_frames.append(np.asarray(env.render(), dtype=np.uint8))
             if mode == "collect" and step % args.every == 0:
-                image = env.render()
-                if image is not None:
-                    frames.append(np.asarray(image, dtype=np.uint8))
-                    labels.append(teacher_latent(low, obs, args.device)
-                                  .squeeze(0).cpu().numpy())
-                    episode_ids.append(ep)
+                frames.append(current_image.copy())
+                previous_frames.append(prev_image.copy())
+                labels.append(teacher_latent(low, obs, args.device)
+                              .squeeze(0).cpu().numpy())
+                episode_ids.append(ep)
 
             achieved = np.asarray(obs["achieved_goal"], np.float32)
             if (needs_replan or
                 np.linalg.norm(achieved - subgoal) < args.reach_radius or
                 elapsed >= args.low_timeout):
                 if mode == "eval":
-                    image = np.asarray(env.render(), dtype=np.uint8)[None]
-                    features = meta_features(meta, image, args.device)
+                    current_features = meta_features(meta, current_image[None], args.device)
+                    previous_features = meta_features(meta, prev_image[None], args.device)
+                    features = np.concatenate((current_features, previous_features), axis=1)
                     with torch.inference_mode():
                         z = bridge(torch.from_numpy(features).to(args.device))
                 else:
@@ -171,6 +177,7 @@ def run_controller(args, mode, bridge=None, meta=None):
                 elapsed, needs_replan = 0, False
             action = low.act(obs, subgoal)
             obs, _, terminated, truncated, info = env.step(action)
+            prev_image = current_image
             step += 1
             elapsed += 1
         success = float(info.get("is_success", info.get("success", 0.0)))
@@ -189,6 +196,7 @@ def run_controller(args, mode, bridge=None, meta=None):
         output = Path(args.data)
         output.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(output, frames=np.stack(frames),
+                            prev_frames=np.stack(previous_frames),
                             target_latents=np.stack(labels),
                             episode_ids=np.array(episode_ids))
         print(f"Saved {len(frames)} aligned RGB/latent pairs to {output}")
@@ -198,6 +206,9 @@ def train_bridge(args):
     raw = np.load(args.data)
     images = raw["frames"]
     targets = np.asarray(raw["target_latents"], dtype=np.float32)
+    if "prev_frames" not in raw:
+        raise RuntimeError("Old dataset lacks prev_frames. Re-run collect with the updated script.")
+    previous_images = raw["prev_frames"]
     episodes = raw["episode_ids"]
     if len(np.unique(episodes)) < 2:
         raise ValueError("Collect at least two episodes to split train and validation.")
@@ -205,6 +216,8 @@ def train_bridge(args):
     print(f"Encoding {len(images)} images using frozen Meta JEPA-WM...")
     meta = open_meta(args.device)
     features = meta_features(meta, images, args.device, args.batch_size)
+    previous_features = meta_features(meta, previous_images, args.device, args.batch_size)
+    features = np.concatenate([features, previous_features], axis=1)
     del meta
     if args.device.type == "cuda":
         torch.cuda.empty_cache()
@@ -249,6 +262,7 @@ def train_bridge(args):
                 "validation_mse": best,
                 "teacher": "Mini-JEPA Medium state latent",
                 "visual_encoder": "Meta JEPA-WM PointMaze (frozen)",
+                "representation": "paired temporal spatial 4x4 Meta tokens",
             }, out)
     print(json.dumps({"bridge_saved": args.output, "best_val_mse": best}))
 
@@ -262,8 +276,8 @@ def main():
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--video-out", default="outputs/visual_medium/visual_nav.mp4")
     parser.add_argument("--seed", type=int, default=20000)
-    parser.add_argument("--every", type=int, default=8)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--every", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=35)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--hidden", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
