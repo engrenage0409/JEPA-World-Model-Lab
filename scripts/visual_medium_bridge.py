@@ -150,6 +150,26 @@ def restore_rng(state, device):
     np.random.set_state(state["numpy"])
 
 
+def fuse_latents(z_state, z_visual, alpha: float, max_ratio: float = 0.5):
+    """Conservative residual interpolation into the pretrained Mini state space.
+
+    alpha=0 reproduces the original Mini state latent exactly.
+    The optional residual cap prevents a badly aligned visual embedding from
+    taking control of the HWM in one step. No new weights are trained here.
+    """
+    if alpha == 0.0:
+        return z_state
+    if z_state.shape != z_visual.shape:
+        raise ValueError(
+            f"Visual/state latent mismatch: {tuple(z_visual.shape)} vs {tuple(z_state.shape)}"
+        )
+    residual = z_visual - z_state
+    state_scale = z_state.float().square().mean(dim=-1, keepdim=True).sqrt().clamp_min(1e-4)
+    delta_scale = residual.float().square().mean(dim=-1, keepdim=True).sqrt().clamp_min(1e-8)
+    cap = (max_ratio * state_scale / delta_scale).clamp(max=1.0)
+    return z_state + alpha * residual * cap
+
+
 def run_controller(args, mode, bridge=None, meta=None):
     task, env, low, psi, g, dec, (fnet, ddpm, config) = make_components(args.device)
     frames, previous_frames, labels, episode_ids, successes = [], [], [], [], []
@@ -192,17 +212,24 @@ def run_controller(args, mode, bridge=None, meta=None):
                 np.linalg.norm(achieved - subgoal) < args.reach_radius or
                 elapsed >= args.low_timeout):
                 if mode == "eval":
-                    current_features = meta_features(meta, current_image[None], args.device)
-                    previous_features = meta_features(meta, prev_image[None], args.device)
-                    features = np.concatenate((current_features, previous_features), axis=1)
                     with torch.inference_mode():
-                        z = bridge(torch.from_numpy(features).to(args.device))
+                        # Always retain the proven state JEPA representation.
+                        z_state = teacher_latent(low, obs, args.device)
+                        if args.fusion_alpha == 0.0:
+                            # Exact Mini-state path, no Meta model needed.
+                            z = z_state
+                        else:
+                            current_features = meta_features(meta, current_image[None], args.device)
+                            previous_features = meta_features(meta, prev_image[None], args.device)
+                            features = np.concatenate((current_features, previous_features), axis=1)
+                            z_visual = bridge(torch.from_numpy(features).to(args.device))
+                            z = fuse_latents(z_state, z_visual, args.fusion_alpha, args.fusion_max_ratio)
                 else:
                     z = teacher_latent(low, obs, args.device)
                 with torch.inference_mode():
                     z_high = psi(z)
-                    # The visual planner always controls the actual trajectory.
-                    # The teacher runs only as a shadow comparison at SAME obs.
+                    # The selected (visual, state, or fused) planner controls the
+                    # trajectory. Shadow teacher uses exactly the same observation.
                     # Restore the RNG after the shadow call to avoid consuming
                     # extra random samples in the actual rollout.
                     random_before = snapshot_rng(args.device) if args.compare_high_level and mode == "eval" else None
@@ -297,7 +324,9 @@ def run_controller(args, mode, bridge=None, meta=None):
                 print(json.dumps({"event": "video_not_available", "category": category,
                                   "reason": "no_matching_episode"}), flush=True)
     print(json.dumps({"mode": mode, "episodes": args.episodes,
-                      "success_rate": float(np.mean(successes))}), flush=True)
+                      "success_rate": float(np.mean(successes)),
+                      "fusion_alpha": args.fusion_alpha if mode == "eval" else None,
+                      "fusion_max_ratio": args.fusion_max_ratio if mode == "eval" else None}), flush=True)
     if mode == "collect":
         output = Path(args.data)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -412,6 +441,10 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--hidden", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--fusion-alpha", type=float, default=1.0,
+                        help="0=Mini state only, 1=visual only (if uncapped); 0.1-0.2 for conservative fusion")
+    parser.add_argument("--fusion-max-ratio", type=float, default=0.5,
+                        help="Max RMS visual residual relative to state RMS; 0.5 is conservative")
     parser.add_argument("--planning-loss-weight", type=float, default=1.0,
                         help="Weight on HWM psi(z_visual) vs psi(z_teacher) loss")
     parser.add_argument("--reach-radius", type=float, default=1.0)
@@ -419,6 +452,10 @@ def main():
     args = parser.parse_args()
     if args.history < 1:
         parser.error("--history must be >= 1")
+    if not (0.0 <= args.fusion_alpha <= 1.0):
+        parser.error("--fusion-alpha must be between 0 and 1")
+    if args.fusion_max_ratio <= 0:
+        parser.error("--fusion-max-ratio must be positive")
     args.device = torch.device(args.device)
     os.environ.setdefault("MUJOCO_GL", "osmesa")
     if args.mode == "collect":
@@ -426,12 +463,16 @@ def main():
     elif args.mode == "train":
         train_bridge(args)
     else:
-        ck = torch.load(args.output, map_location="cpu", weights_only=True)
-        bridge = VisualBridge(ck["input_dim"], ck["target_dim"], ck["hidden"])
-        bridge.load_state_dict(ck["model"])
-        bridge.to(args.device).eval()
-        meta = open_meta(args.device)
-        run_controller(args, "eval", bridge, meta)
+        if args.fusion_alpha == 0.0:
+            # The pure state baseline requires neither bridge nor Meta checkpoint.
+            run_controller(args, "eval")
+        else:
+            ck = torch.load(args.output, map_location="cpu", weights_only=True)
+            bridge = VisualBridge(ck["input_dim"], ck["target_dim"], ck["hidden"])
+            bridge.load_state_dict(ck["model"])
+            bridge.to(args.device).eval()
+            meta = open_meta(args.device)
+            run_controller(args, "eval", bridge, meta)
 
 
 if __name__ == "__main__":
