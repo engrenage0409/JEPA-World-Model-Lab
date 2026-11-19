@@ -249,3 +249,42 @@ python scripts/medium_action_predictor.py train \
 Only evaluate navigation if the visual XY readout and action-conditioned
 transition diagnostics look credible. Avoid overclaiming predictor benefits
 from raw navigation success if action ablations remain non-discriminative.
+
+
+### 2026-11-19: second dynamics-run diagnosis and temporal-context restoration
+
+Latest held-out run with a 4x4 spatial XY head:
+
+- true-action future latent MSE **4.3039**
+- negated-action future latent MSE **4.2798**
+- frozen identity (current visual latent) future latent MSE **0.04236**
+- current visual position readout mean XY error **1.2408**
+- predicted-future XY error **2.391**
+
+These numbers do not validate useful action-conditioned visual predictions.
+The correct-action forecast is about 102x worse than simply copying the
+current visual latent. Avoid claiming model-based navigation success before
+that basic benchmark is beaten.
+
+Code review found the initial dimension hotfix had reduced the pretrained
+`ctxt_window=2` to one visual/proprio frame and one packed 5-step action.
+The new code restores two input frames and **two aligned 5-step action
+blocks** (previous actions and candidate future actions). The dataset
+already contains contiguous 5-step intervals; previous blocks are retrieved
+from the preceding row *within the same episode*. The first row of each
+episode is excluded from Predictor fitting because its prior actions aren't
+in the dataset. The visual XY head still uses all rows. Eval constructs
+the prior block from the executed actions; the first five steps use zero
+padding as a warm-start.
+
+This change is an interface correction, **not** a verified improvement.
+The pretrained Predictor may still be out-of-domain for Mini PointMaze;
+absolute magnitude and action ablations must be checked again. No data
+recollection is required.
+
+~~~bash
+git pull origin visual-hierarchical-jepa
+python scripts/medium_action_predictor.py train \
+  --device cuda --head-epochs 4 --epochs 3 \
+  --checkpoint outputs/medium_action/meta_action_adapter_temporal.pt
+~~~
