@@ -81,8 +81,15 @@ def build_tasks():
 TASKS = build_tasks()
 
 
-def sample_medium_task(seed):
-    level = os.environ.get("JEPA_MAZE_LEVEL", "detour").lower()
+def sample_medium_task(seed, level=None):
+    """Sample one deterministic, collision-free grid-centre task.
+
+    Explicit maze-medium-{straight,corner,detour} task names take priority.
+    JEPA_MAZE_LEVEL remains supported for the legacy maze-medium config.
+    """
+    if level is None:
+        level = os.environ.get("JEPA_MAZE_LEVEL", "detour")
+    level = level.lower()
 
     if level not in TASKS:
         raise ValueError(f"Invalid difficulty: {level}")
@@ -97,6 +104,10 @@ def sample_medium_task(seed):
     ]
 
     def to_state(cell):
+        # Official maze_model.py: wall centre is (r+1, c+1), while the
+        # particle body is initially at (1.2, 1.2). The slider qpos that
+        # puts the particle at a free tile centre is therefore tile-0.2.
+        # This 0.2 offset must not be changed to tile+1.
         return np.array(
             [cell[0] - 0.2, cell[1] - 0.2, 0.0, 0.0],
             dtype=np.float64
@@ -107,6 +118,12 @@ def sample_medium_task(seed):
         f"start={start} goal={goal} "
         f"BFS={distance} turns={turns}"
     )
+
+    # Check that our grid-to-qpos mapping stays in the free cells.
+    for cell in (start, goal):
+        qpos = to_state(cell)[:2]
+        world_pos = qpos + np.array([1.2, 1.2])
+        assert np.allclose(world_pos, np.asarray(cell) + 1.0)
 
     return to_state(start), to_state(goal)
 
