@@ -176,8 +176,11 @@ def collect(args):
 
 
 def train(args):
-    data = np.load(args.data)
-    episodes = np.asarray(data["episode"])
+    # npz indexing decompresses a whole array each time; load each array ONCE.
+    # Otherwise per-example DINO encoding repeatedly decompresses ~hundreds MB.
+    with np.load(args.data) as packed:
+        data = {name: np.asarray(packed[name]) for name in packed.files}
+    episodes = data["episode"]
     if len(np.unique(episodes)) < 2:
         raise ValueError("Collect at least two complete episodes for validation")
     holdout = np.unique(episodes)[-max(1, len(np.unique(episodes)) // 5):]
