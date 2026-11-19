@@ -232,6 +232,12 @@ def train_bridge(args):
     x = torch.tensor(features, dtype=torch.float32)
     y = torch.tensor(targets, dtype=torch.float32)
     bridge = VisualBridge(x.shape[1], y.shape[1], args.hidden).to(args.device)
+    # Freeze Mini-JEPA HWM high-level encoder, while allowing gradients
+    # through it to train ONLY the bridge toward planning-relevant features.
+    psi, _, _, _, _ = load_hwm(str(paths()["hwm"]), args.device)
+    psi.eval()
+    for parameter in psi.parameters():
+        parameter.requires_grad_(False)
     opt = torch.optim.AdamW(bridge.parameters(), lr=args.lr, weight_decay=1e-4)
     best = float("inf")
     for epoch in range(args.epochs):
@@ -241,9 +247,12 @@ def train_bridge(args):
             ids = permutation[pos:pos + args.batch_size]
             pred = bridge(x[ids].to(args.device))
             target = y[ids].to(args.device)
-            loss = F.mse_loss(pred, target) + 0.1 * (
-                1.0 - F.cosine_similarity(pred, target, dim=-1).mean()
-            )
+            with torch.no_grad():
+                target_high = psi(target)
+            high_pred = psi(pred)
+            loss = (F.mse_loss(pred, target)
+                    + 0.1 * (1.0 - F.cosine_similarity(pred, target, dim=-1).mean())
+                    + args.planning_loss_weight * F.mse_loss(high_pred, target_high))
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -251,10 +260,15 @@ def train_bridge(args):
         with torch.inference_mode():
             val_x = x[valid].to(args.device)
             val_y = y[valid].to(args.device)
-            val_mse = F.mse_loss(bridge(val_x), val_y).item()
-        print(f"epoch={epoch + 1} validation_mse={val_mse:.6f}", flush=True)
-        if val_mse < best:
-            best = val_mse
+            val_pred = bridge(val_x)
+            val_mse = F.mse_loss(val_pred, val_y).item()
+            val_high_mse = F.mse_loss(psi(val_pred), psi(val_y)).item()
+            val_score = val_mse + args.planning_loss_weight * val_high_mse
+        print(f"epoch={epoch + 1} validation_mse={val_mse:.6f} "
+              f"validation_high_mse={val_high_mse:.6f} "
+              f"validation_score={val_score:.6f}", flush=True)
+        if val_score < best:
+            best = val_score
             out = Path(args.output)
             out.parent.mkdir(parents=True, exist_ok=True)
             torch.save({
@@ -262,12 +276,15 @@ def train_bridge(args):
                 "input_dim": x.shape[1],
                 "target_dim": y.shape[1],
                 "hidden": args.hidden,
-                "validation_mse": best,
+                "validation_mse": val_mse,
+                "validation_high_mse": val_high_mse,
+                "validation_score": best,
+                "planning_loss_weight": args.planning_loss_weight,
                 "teacher": "Mini-JEPA Medium state latent",
                 "visual_encoder": "Meta JEPA-WM PointMaze (frozen)",
                 "representation": "paired temporal spatial 4x4 Meta tokens",
             }, out)
-    print(json.dumps({"bridge_saved": args.output, "best_val_mse": best}))
+    print(json.dumps({"bridge_saved": args.output, "best_validation_score": best}))
 
 
 def main():
@@ -286,6 +303,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--hidden", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--planning-loss-weight", type=float, default=1.0,
+                        help="Weight on HWM psi(z_visual) vs psi(z_teacher) loss")
     parser.add_argument("--reach-radius", type=float, default=1.0)
     parser.add_argument("--low-timeout", type=int, default=90)
     args = parser.parse_args()
