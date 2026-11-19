@@ -19,3 +19,8 @@ external/jepa-wms/**/*.gif
 external/jepa-wms/*.before_*
 external/jepa-wms/**/*.before_*
 external/jepa-wms/**/*.yaml.bak
+
+# Third-party source and generated diagnostics
+/external/mini-jepa/
+/external/jepa-wms/diagnostics/
+/external/jepa-wms/evals/unroll_decode/demo_data.npz
