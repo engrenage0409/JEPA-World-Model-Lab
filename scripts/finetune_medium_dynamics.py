@@ -237,6 +237,7 @@ def main():
                 "validation_identity_mse": metrics["identity"],
                 "validation_wrong_action_mse": metrics["negative"],
                 "validation_xy_error": metrics["future_xy"],
+                "validation_passed": bool(metrics["beats_identity"] and metrics["action_sensitive"]),
                 "train_episodes": np.unique(episodes[train_idx]).tolist(),
                 "valid_episodes": holdout.tolist(),
                 "method": "frozen Meta visual encoder + fine-tuned final AdaLN blocks + residual calibration",
