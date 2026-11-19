@@ -126,7 +126,7 @@ def teacher_latent(low, obs, device):
 def run_controller(args, mode, bridge=None, meta=None):
     task, env, low, psi, g, dec, (fnet, ddpm, config) = make_components(args.device)
     frames, previous_frames, labels, episode_ids, successes = [], [], [], [], []
-    video_frames = []
+    saved_video_types = set()
     # The flow sampler is stochastic. Seeds are fixed for repeatable evaluation.
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -141,13 +141,17 @@ def run_controller(args, mode, bridge=None, meta=None):
         terminated = truncated = False
         info = {}
         step = 0
+        # Record candidate episodes until one success and one failure are saved.
+        record_episode = (mode == "eval" and bool(args.video_out)
+                          and len(saved_video_types) < 2)
+        episode_video_frames = []
         initial_image = np.asarray(env.render(), dtype=np.uint8)
         history = deque([initial_image] * (args.history + 1), maxlen=args.history + 1)
         while not (terminated or truncated):
             current_image = np.asarray(env.render(), dtype=np.uint8)
             prev_image = history[0]
-            if mode == "eval" and ep == 0 and args.video_out and step % 2 == 0:
-                video_frames.append(np.asarray(env.render(), dtype=np.uint8))
+            if record_episode and step % 2 == 0:
+                episode_video_frames.append(current_image.copy())
             if mode == "collect" and step % args.every == 0:
                 frames.append(current_image.copy())
                 previous_frames.append(prev_image.copy())
@@ -187,12 +191,29 @@ def run_controller(args, mode, bridge=None, meta=None):
         successes.append(success)
         print(json.dumps({"episode": ep, "seed": args.seed + ep,
                           "steps": step, "success": success}), flush=True)
+        if record_episode:
+            category = "success" if success > 0.5 else "failure"
+            if category not in saved_video_types and episode_video_frames:
+                import imageio.v2 as imageio
+                video_base = Path(args.video_out)
+                video_path = video_base.with_name(
+                    f"{video_base.stem}_{category}{video_base.suffix or '.mp4'}"
+                )
+                video_path.parent.mkdir(parents=True, exist_ok=True)
+                final_frame = np.asarray(env.render(), dtype=np.uint8)
+                episode_video_frames.append(final_frame.copy())
+                imageio.mimsave(str(video_path), episode_video_frames, fps=30)
+                saved_video_types.add(category)
+                print(json.dumps({"event": "video_saved", "category": category,
+                                  "episode": ep, "seed": args.seed + ep,
+                                  "path": str(video_path), "frames": len(episode_video_frames)}),
+                      flush=True)
     env.close()
-    if video_frames:
-        import imageio.v2 as imageio
-        Path(args.video_out).parent.mkdir(parents=True, exist_ok=True)
-        imageio.mimsave(args.video_out, video_frames, fps=30)
-        print(json.dumps({"video_saved": args.video_out}), flush=True)
+    if mode == "eval" and args.video_out:
+        for category in ("success", "failure"):
+            if category not in saved_video_types:
+                print(json.dumps({"event": "video_not_available", "category": category,
+                                  "reason": "no_matching_episode"}), flush=True)
     print(json.dumps({"mode": mode, "episodes": args.episodes,
                       "success_rate": float(np.mean(successes))}), flush=True)
     if mode == "collect":
