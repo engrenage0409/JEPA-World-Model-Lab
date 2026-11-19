@@ -44,3 +44,21 @@ Source repos: facebookresearch/jepa-wms and WilliamZhang20/Mini-JEPA.
 
 ## V2 after first visual run
 The initial global-mean-pooled single-frame bridge scored 1/10 on eval seeds 30000-30009 (best validation MSE 0.6052). V2 preserves Meta spatial tokens as a 4x4 grid and adds a four-step temporal image pair; collect and train must be rerun. V2 is not yet tested and does not use the Meta action-conditioned predictor. No V2 success rate is asserted.
+
+
+## Shadow planning diagnosis (no training required)
+
+The current V3 visual bridge achieved 2/10 on seeds 30000-30009 versus 3/10 for V2. Before further training, compare each replan with the Mini teacher at the **same exact observed state**.
+
+```bash
+python scripts/visual_medium_bridge.py eval \
+  --device cuda --episodes 3 --seed 30000 --history 4 \
+  --output outputs/visual_medium/visual_bridge_v3.pt \
+  --compare-high-level \
+  --comparison-out outputs/visual_medium/v3_high_level.jsonl \
+  --video-out ''
+```
+
+The real controller always uses **visual** subgoals. A separate Mini teacher proposes an alternate subgoal using a snapshot/restoration of Torch/NumPy RNG state to match sampling and avoid perturbing the real rollout. Results log high-latent MSE/cosine, subgoal distance and both subgoal coordinates, plus per-episode summaries. The teacher is evaluated at **the visual policy's encountered states**; this is not a separate teacher rollout and does not itself prove which subgoal is optimal.
+
+Interpretation: if high latents and chosen subgoals diverge immediately, improve representation alignment; if they remain close yet both fail, inspect macro planning, goal semantics and low-level tracking. Neither outcome should be presumed in advance.
