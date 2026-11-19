@@ -442,9 +442,9 @@ def main():
     parser.add_argument("--hidden", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--fusion-alpha", type=float, default=1.0,
-                        help="0=Mini state only, 1=visual only (if uncapped); 0.1-0.2 for conservative fusion")
-    parser.add_argument("--fusion-max-ratio", type=float, default=0.5,
-                        help="Max RMS visual residual relative to state RMS; 0.5 is conservative")
+                        help="0=Mini state only, 1=visual only when uncapped; 0.1-0.2 with cap 0.5 for conservative fusion")
+    parser.add_argument("--fusion-max-ratio", type=float, default=1000000.0,
+                        help="Residual RMS cap relative to state; default effectively uncapped to preserve old visual-only behavior")
     parser.add_argument("--planning-loss-weight", type=float, default=1.0,
                         help="Weight on HWM psi(z_visual) vs psi(z_teacher) loss")
     parser.add_argument("--reach-radius", type=float, default=1.0)
