@@ -121,6 +121,7 @@ def teacher_latent(low, obs, device):
 def run_controller(args, mode, bridge=None, meta=None):
     task, env, low, psi, g, dec, (fnet, ddpm, config) = make_components(args.device)
     frames, labels, episode_ids, successes = [], [], [], []
+    video_frames = []
     # The flow sampler is stochastic. Seeds are fixed for repeatable evaluation.
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -136,6 +137,8 @@ def run_controller(args, mode, bridge=None, meta=None):
         info = {}
         step = 0
         while not (terminated or truncated):
+            if mode == "eval" and ep == 0 and args.video_out and step % 2 == 0:
+                video_frames.append(np.asarray(env.render(), dtype=np.uint8))
             if mode == "collect" and step % args.every == 0:
                 image = env.render()
                 if image is not None:
@@ -175,6 +178,11 @@ def run_controller(args, mode, bridge=None, meta=None):
         print(json.dumps({"episode": ep, "seed": args.seed + ep,
                           "steps": step, "success": success}), flush=True)
     env.close()
+    if video_frames:
+        import imageio.v2 as imageio
+        Path(args.video_out).parent.mkdir(parents=True, exist_ok=True)
+        imageio.mimsave(args.video_out, video_frames, fps=30)
+        print(json.dumps({"video_saved": args.video_out}), flush=True)
     print(json.dumps({"mode": mode, "episodes": args.episodes,
                       "success_rate": float(np.mean(successes))}), flush=True)
     if mode == "collect":
@@ -252,6 +260,7 @@ def main():
     parser.add_argument("--data", default="outputs/visual_medium/paired_data.npz")
     parser.add_argument("--output", default="outputs/visual_medium/visual_bridge.pt")
     parser.add_argument("--episodes", type=int, default=10)
+    parser.add_argument("--video-out", default="outputs/visual_medium/visual_nav.mp4")
     parser.add_argument("--seed", type=int, default=20000)
     parser.add_argument("--every", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=20)
