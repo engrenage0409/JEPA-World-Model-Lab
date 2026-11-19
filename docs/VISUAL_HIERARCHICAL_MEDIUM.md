@@ -14,13 +14,13 @@ export MUJOCO_GL=osmesa
 export PYTHONNOUSERSITE=1
 
 # Collect aligned camera frames and teacher state latents
-python scripts/visual_medium_bridge.py collect --episodes 10 --device cuda --every 8
+python scripts/visual_medium_bridge.py collect --episodes 30 --device cuda --every 4 --history 4
 
 # Train a small bridge with Meta image encoder frozen
-python scripts/visual_medium_bridge.py train --device cuda --epochs 20 --batch-size 2
+python scripts/visual_medium_bridge.py train --device cuda --epochs 35 --batch-size 2
 
 # Evaluate the new visual HIGH-LEVEL planner on unseen seeds
-python scripts/visual_medium_bridge.py eval --device cuda --episodes 10 --seed 30000
+python scripts/visual_medium_bridge.py eval --device cuda --episodes 10 --seed 30000 --history 4
 ~~~
 
 Data and model outputs are saved in outputs/visual_medium/. Do not commit large runtime data or checkpoints.
@@ -41,3 +41,6 @@ The validation split holds out entire episodes to reduce frame leakage. The eval
 - Full visual JEPA-WM planning remains future work: adapt the original Meta action-conditioned predictor and remove privileged low-level state.
 
 Source repos: facebookresearch/jepa-wms and WilliamZhang20/Mini-JEPA.
+
+## V2 after first visual run
+The initial global-mean-pooled single-frame bridge scored 1/10 on eval seeds 30000-30009 (best validation MSE 0.6052). V2 preserves Meta spatial tokens as a 4x4 grid and adds a four-step temporal image pair; collect and train must be rerun. V2 is not yet tested and does not use the Meta action-conditioned predictor. No V2 success rate is asserted.
