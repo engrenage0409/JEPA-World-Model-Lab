@@ -123,10 +123,38 @@ def teacher_latent(low, obs, device):
         return low.model.encode(x)
 
 
+def plan_subgoal(fnet, ddpm, g, dec, z_high, goal, device, config):
+    """Use the same official Mini flow scorer for visual and teacher latents."""
+    return flow_macro_subgoal(
+        fnet, ddpm, g, dec, z_high, goal, device,
+        n_samples=config.get("n_samples", 16),
+        flow_steps=int(ddpm["T"]),
+        horizon=config.get("horizon", 1),
+    )
+
+
+def snapshot_rng(device):
+    """Capture both Torch and NumPy RNG so a shadow plan cannot alter the policy."""
+    return {
+        "cpu": torch.get_rng_state().clone(),
+        "cuda": torch.cuda.get_rng_state(device).clone()
+                if device.type == "cuda" else None,
+        "numpy": np.random.get_state(),
+    }
+
+
+def restore_rng(state, device):
+    torch.set_rng_state(state["cpu"])
+    if state["cuda"] is not None:
+        torch.cuda.set_rng_state(state["cuda"], device)
+    np.random.set_state(state["numpy"])
+
+
 def run_controller(args, mode, bridge=None, meta=None):
     task, env, low, psi, g, dec, (fnet, ddpm, config) = make_components(args.device)
     frames, previous_frames, labels, episode_ids, successes = [], [], [], [], []
     saved_video_types = set()
+    comparisons = []
     # The flow sampler is stochastic. Seeds are fixed for repeatable evaluation.
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -173,12 +201,42 @@ def run_controller(args, mode, bridge=None, meta=None):
                     z = teacher_latent(low, obs, args.device)
                 with torch.inference_mode():
                     z_high = psi(z)
-                    subgoal = flow_macro_subgoal(
-                        fnet, ddpm, g, dec, z_high, goal, args.device,
-                        n_samples=config.get("n_samples", 16),
-                        flow_steps=int(ddpm["T"]),
-                        horizon=config.get("horizon", 1),
-                    )
+                    # The visual planner always controls the actual trajectory.
+                    # The teacher runs only as a shadow comparison at SAME obs.
+                    # Restore the RNG after the shadow call to avoid consuming
+                    # extra random samples in the actual rollout.
+                    random_before = snapshot_rng(args.device) if args.compare_high_level and mode == "eval" else None
+                    subgoal = plan_subgoal(fnet, ddpm, g, dec, z_high, goal, args.device, config)
+                    if random_before is not None:
+                        random_after = snapshot_rng(args.device)
+                        try:
+                            restore_rng(random_before, args.device)
+                            z_teacher = teacher_latent(low, obs, args.device)
+                            teacher_high = psi(z_teacher)
+                            teacher_subgoal = plan_subgoal(
+                                fnet, ddpm, g, dec, teacher_high, goal,
+                                args.device, config,
+                            )
+                        finally:
+                            restore_rng(random_after, args.device)
+                        visual_xy = np.asarray(subgoal, dtype=np.float32).reshape(-1)
+                        teacher_xy = np.asarray(teacher_subgoal, dtype=np.float32).reshape(-1)
+                        row = {
+                            "episode": ep,
+                            "seed": args.seed + ep,
+                            "step": step,
+                            "achieved_xy": achieved.tolist(),
+                            "goal_xy": goal.tolist(),
+                            "visual_subgoal_xy": visual_xy.tolist(),
+                            "teacher_subgoal_xy": teacher_xy.tolist(),
+                            "subgoal_distance": float(np.linalg.norm(visual_xy - teacher_xy)),
+                            "visual_latent_mse": float(F.mse_loss(z, z_teacher).item()),
+                            "high_latent_mse": float(F.mse_loss(z_high, teacher_high).item()),
+                            "high_latent_cosine": float(F.cosine_similarity(z_high, teacher_high, dim=-1).mean().item()),
+                        }
+                        comparisons.append(row)
+                        if args.log_comparisons:
+                            print(json.dumps({"event": "high_level_comparison", **row}), flush=True)
                 if np.linalg.norm(subgoal - goal) < args.reach_radius:
                     subgoal = goal
                 elapsed, needs_replan = 0, False
@@ -209,6 +267,30 @@ def run_controller(args, mode, bridge=None, meta=None):
                                   "path": str(video_path), "frames": len(episode_video_frames)}),
                       flush=True)
     env.close()
+    if comparisons:
+        comparison_file = Path(args.comparison_out)
+        comparison_file.parent.mkdir(parents=True, exist_ok=True)
+        with comparison_file.open("w", encoding="utf-8") as fh:
+            for row in comparisons:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\\n")
+        # Per-episode statistics make it easier to locate where plans diverge.
+        by_episode = {}
+        for row in comparisons:
+            ep = row["episode"]
+            by_episode.setdefault(ep, []).append(row)
+        for ep, rows in by_episode.items():
+            print(json.dumps({
+                "event": "high_level_episode_summary",
+                "episode": ep,
+                "seed": args.seed + ep,
+                "comparisons": len(rows),
+                "mean_subgoal_distance": float(np.mean([x["subgoal_distance"] for x in rows])),
+                "mean_high_latent_mse": float(np.mean([x["high_latent_mse"] for x in rows])),
+                "mean_high_latent_cosine": float(np.mean([x["high_latent_cosine"] for x in rows])),
+                "first_subgoal_distance": rows[0]["subgoal_distance"],
+            }), flush=True)
+        print(json.dumps({"event": "high_level_comparison_saved",
+                          "path": str(comparison_file), "rows": len(comparisons)}), flush=True)
     if mode == "eval" and args.video_out:
         for category in ("success", "failure"):
             if category not in saved_video_types:
@@ -316,6 +398,12 @@ def main():
     parser.add_argument("--output", default="outputs/visual_medium/visual_bridge.pt")
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--video-out", default="outputs/visual_medium/visual_nav.mp4")
+    parser.add_argument("--compare-high-level", action="store_true",
+                        help="Shadow compare visual vs Mini teacher subgoals without changing controls")
+    parser.add_argument("--comparison-out",
+                        default="outputs/visual_medium/high_level_comparison.jsonl")
+    parser.add_argument("--log-comparisons", action="store_true",
+                        help="Print every high-level comparison rather than only episode averages")
     parser.add_argument("--seed", type=int, default=20000)
     parser.add_argument("--every", type=int, default=4)
     parser.add_argument("--history", type=int, default=4,
