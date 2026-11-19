@@ -425,6 +425,12 @@ def evaluate(args):
         meta = open_meta(args.device)
         corrector = None
         if ck.get("dynamics_finetuned"):
+            if not ck.get("validation_passed", False) and not args.allow_unvalidated_predictor:
+                raise RuntimeError(
+                    "Fine-tuned Predictor did not beat identity AND incorrect-action "
+                    "baselines on held-out data. Pass --allow-unvalidated-predictor "
+                    "ONLY for debugging, not as a validated navigation result."
+                )
             by_name = dict(meta.model.predictor.named_parameters())
             for name, value in ck["predictor_tuned"].items():
                 if name not in by_name or by_name[name].shape != value.shape:
@@ -557,6 +563,8 @@ def main():
     ap.add_argument("--position-weight", type=float, default=0.1)
     ap.add_argument("--candidates", type=int, default=4)
     ap.add_argument("--planner", choices=["meta", "flow"], default="meta")
+    ap.add_argument("--allow-unvalidated-predictor", action="store_true",
+                    help="Research/debug only: permit Meta control before held-out dynamics checks pass")
     ap.add_argument("--reach-radius", type=float, default=1.0)
     ap.add_argument("--low-timeout", type=int, default=90)
     args = ap.parse_args()
