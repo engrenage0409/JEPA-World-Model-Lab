@@ -5,7 +5,7 @@
 import gym
 import numpy as np
 
-from evals.simu_env_planning.envs.pointmaze_env.maze_model import MazeEnv, MEDIUM_MAZE, parse_maze, EMPTY, GOAL
+from evals.simu_env_planning.envs.pointmaze_env.maze_model import MazeEnv, MEDIUM_MAZE
 from evals.simu_env_planning.envs.wrappers.time_limit import TimeLimit
 
 STATE_RANGES = np.array(
@@ -30,10 +30,12 @@ class PointMazeWrapper(gym.Wrapper):
         from evals.simu_env_planning.envs.pointmaze_curriculum import (
             sample_medium_task,
         )
-        return sample_medium_task(seed)
+        task = self.cfg.task_specification.task
+        level = task.removeprefix("maze-medium-") if task.startswith("maze-medium-") else None
+        return sample_medium_task(seed, level=level)
 
     def sample_random_init_goal_states(self, seed):
-        if self.cfg is not None and self.cfg.task_specification.task == "maze-medium":
+        if self.cfg is not None and self.cfg.task_specification.task.startswith("maze-medium"):
             return self.sample_medium_states(seed)
 
 
@@ -110,7 +112,9 @@ def make_env(cfg, env_cls=None):
         "ref_max_score": 161.86,
         "dataset_url": "http://rail.eecs.berkeley.edu/datasets/offline_rl/maze2d/maze2d-umaze-sparse-v1.hdf5",
     }
-    if cfg.task_specification.task == "maze-medium":
+    if cfg.task_specification.task.startswith("maze-medium"):
+        # Keep with_target=False: the pretrained model expects 4D proprio.
+        # Goal is encoded separately from a rendered state by PlanEvaluator.
         env = MazeEnv(maze_spec=MEDIUM_MAZE, **kwargs)
     else:
         env = MazeEnv(**kwargs)
