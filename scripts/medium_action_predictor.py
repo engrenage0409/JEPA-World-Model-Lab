@@ -75,12 +75,29 @@ class PositionHead(nn.Module):
         return self.net(z.mean(dim=(1, 2, 3)))
 
 
-def encode_images(meta, images, device):
-    # [B,T,H,W,3] uint8 -> Meta [B,T,V,H,W,D]
+def encode_images(meta, images, device, proprio=None):
+    """Meta visual encoder; supply matching 4D proprio when using AdaLN Predictor.
+
+    The official PointMaze AdaLN expects 384 visual + 16 proprio features.
+    Omitting proprio passes 384D tokens to a 400D LayerNorm and crashes.
+    """
     arr = np.ascontiguousarray(images)
     x = torch.from_numpy(arr).permute(0, 1, 4, 2, 3).to(device)
     with torch.no_grad():
-        return meta.encode(x)
+        if proprio is None:
+            return meta.encode(x)
+        p = torch.as_tensor(np.ascontiguousarray(proprio), dtype=torch.float32)
+        if p.shape != (x.shape[0], x.shape[1], 4):
+            raise ValueError(f"Expected proprio [B,T,4], got {tuple(p.shape)}")
+        return meta.encode({"visual": x, "proprio": p})
+
+
+def env_proprio(obs):
+    """PointMaze simulator state: current xy and xy velocity (four floats)."""
+    p = np.asarray(obs["observation"], dtype=np.float32).reshape(-1)
+    if p.shape[0] < 4:
+        raise ValueError(f"Expected position + velocity, got {p.shape}")
+    return p[:4].copy()
 
 
 def normalize_actions(actions, mean, std):
@@ -90,7 +107,9 @@ def normalize_actions(actions, mean, std):
 def action_predict(meta, ctx, actions, adapter):
     """Differentiable through adapter, frozen official Meta predictor."""
     a = adapter(actions)
-    return meta.unroll(ctx, a.unsqueeze(0))[-1]  # [B,V,H,W,D]
+    prediction = meta.unroll(ctx, a.unsqueeze(0))
+    # Multimodal official model returns TensorDict[T,B,...], not a visual tensor.
+    return prediction["visual"][-1] if isinstance(ctx, dict) or hasattr(ctx, "keys") else prediction[-1]
 
 
 def select_low_chunks(low, obs, subgoal, count, device):
@@ -122,7 +141,8 @@ def collect(args):
     _, env, low, psi, g, dec, (fnet, ddpm, config) = make_components(args.device)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    records = dict(context=[], future=[], actions=[], xy=[], next_xy=[], episode=[])
+    records = dict(context=[], context_proprio=[], future=[], actions=[],
+                   xy=[], next_xy=[], episode=[])
     try:
         for ep in range(args.episodes):
             obs, _ = env.reset(seed=args.seed + ep)
@@ -133,6 +153,7 @@ def collect(args):
             images = [np.asarray(env.render(), dtype=np.uint8).copy()]
             actions = []
             positions = [np.asarray(obs["achieved_goal"], np.float32).copy()]
+            proprios = [env_proprio(obs)]
             while not (done or truncated):
                 reached = np.asarray(obs["achieved_goal"], np.float32)
                 if need or np.linalg.norm(reached - subgoal) < args.reach_radius or elapsed >= args.low_timeout:
@@ -147,6 +168,7 @@ def collect(args):
                 actions.append(np.asarray(action, np.float32))
                 images.append(np.asarray(env.render(), dtype=np.uint8).copy())
                 positions.append(np.asarray(obs["achieved_goal"], np.float32).copy())
+                proprios.append(env_proprio(obs))
                 step += 1
                 elapsed += 1
                 # Context is images[t-5], images[t]; target image[t+5].
@@ -154,6 +176,7 @@ def collect(args):
                 if step >= 2 * STRIDE and step % STRIDE == 0:
                     t = step - STRIDE
                     records["context"].append(np.stack((images[t-STRIDE], images[t])))
+                    records["context_proprio"].append(np.stack((proprios[t-STRIDE], proprios[t])))
                     records["future"].append(images[t+STRIDE])
                     records["actions"].append(np.stack(actions[t:t+STRIDE]))
                     records["xy"].append(positions[t].copy())
@@ -180,6 +203,8 @@ def train(args):
     # Otherwise per-example DINO encoding repeatedly decompresses ~hundreds MB.
     with np.load(args.data) as packed:
         data = {name: np.asarray(packed[name]) for name in packed.files}
+    if "context_proprio" not in data:
+        raise RuntimeError("Dataset lacks 4D PointMaze proprio inputs; re-run collect with this version.")
     episodes = data["episode"]
     if len(np.unique(episodes)) < 2:
         raise ValueError("Collect at least two complete episodes for validation")
@@ -220,7 +245,8 @@ def train(args):
         order = np.random.permutation(train_ids)
         losses = []
         for i in order:
-            ctx = encode_images(meta, data["context"][i:i+1], args.device)
+            ctx = encode_images(meta, data["context"][i:i+1], args.device,
+                                proprio=data["context_proprio"][i:i+1])
             future = encode_images(meta, data["future"][i:i+1, None], args.device)[:, 0]
             actions = torch.as_tensor(np.asarray(data["actions"][i:i+1]),
                                       device=args.device, dtype=torch.float32)
@@ -238,7 +264,8 @@ def train(args):
         val_pred, val_xy, val_base = [], [], []
         with torch.no_grad():
             for i in valid_ids[:args.max_valid]:
-                ctx = encode_images(meta, data["context"][i:i+1], args.device)
+                ctx = encode_images(meta, data["context"][i:i+1], args.device,
+                                    proprio=data["context_proprio"][i:i+1])
                 future = encode_images(meta, data["future"][i:i+1, None], args.device)[:, 0]
                 actions = torch.as_tensor(np.asarray(data["actions"][i:i+1]),
                                           device=args.device, dtype=torch.float32)
@@ -297,6 +324,7 @@ def evaluate(args):
             subgoal = goal.copy()
             prev = np.asarray(env.render(), np.uint8)
             history = deque([prev] * (STRIDE+1), maxlen=STRIDE+1)
+            proprio_history = deque([env_proprio(obs)] * (STRIDE+1), maxlen=STRIDE+1)
             queue = deque()
             step, elapsed, need = 0, 0, True
             done = truncated = False
@@ -320,7 +348,9 @@ def evaluate(args):
                     # Encode actual current and 5-steps-back frames; action
                     # predictor proposes future visual token for each chunk.
                     curr = np.asarray(env.render(), np.uint8)
-                    ctx = encode_images(meta, np.stack((history[0], curr))[None], args.device)
+                    context_p = np.stack((proprio_history[0], env_proprio(obs)))[None]
+                    ctx = encode_images(meta, np.stack((history[0], curr))[None],
+                                        args.device, proprio=context_p)
                     with torch.no_grad():
                         scores, predicted_positions = [], []
                         for chunk in chunks:
@@ -339,6 +369,7 @@ def evaluate(args):
                 action = queue.popleft() if args.planner == "meta" else low.act(obs, subgoal)
                 obs, _, done, truncated, info = env.step(action)
                 history.append(np.asarray(env.render(), np.uint8).copy())
+                proprio_history.append(env_proprio(obs))
                 step += 1; elapsed += 1
             success.append(float(info.get("is_success", info.get("success", 0))))
             if record_video and video_frames:
