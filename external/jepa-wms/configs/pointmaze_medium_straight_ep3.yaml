@@ -178,7 +178,7 @@ model_kwargs:
   wrapper_kwargs:
     ctxt_window: 2
 task_specification:
-  task: maze-medium
+  task: maze-medium-straight
   obs: rgb_state
   obs_concat_channels: false
   goal_source: random_state
