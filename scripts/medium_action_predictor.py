@@ -289,6 +289,7 @@ def evaluate(args):
     np.random.seed(args.seed); torch.manual_seed(args.seed)
     success = []
     decisions = []
+    saved_video_types = set()
     try:
         for ep in range(args.episodes):
             obs, _ = env.reset(seed=args.seed + ep)
@@ -300,7 +301,11 @@ def evaluate(args):
             step, elapsed, need = 0, 0, True
             done = truncated = False
             info = {}
+            record_video = bool(args.video_out) and len(saved_video_types) < 2
+            video_frames = []
             while not (done or truncated):
+                if record_video and step % 2 == 0:
+                    video_frames.append(np.asarray(env.render(), np.uint8).copy())
                 achieved = np.asarray(obs["achieved_goal"], np.float32)
                 if need or np.linalg.norm(achieved - subgoal) < args.reach_radius or elapsed >= args.low_timeout:
                     with torch.inference_mode():
@@ -336,6 +341,18 @@ def evaluate(args):
                 history.append(np.asarray(env.render(), np.uint8).copy())
                 step += 1; elapsed += 1
             success.append(float(info.get("is_success", info.get("success", 0))))
+            if record_video and video_frames:
+                category = "success" if success[-1] > 0.5 else "failure"
+                if category not in saved_video_types:
+                    import imageio.v2 as imageio
+                    path = Path(args.video_out)
+                    path = path.with_name(f"{path.stem}_{args.planner}_{category}{path.suffix or '.mp4'}")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    video_frames.append(np.asarray(env.render(), np.uint8).copy())
+                    imageio.mimsave(str(path), video_frames, fps=30)
+                    saved_video_types.add(category)
+                    print(json.dumps({"event": "video_saved", "seed": args.seed+ep,
+                                      "category": category, "path": str(path)}), flush=True)
             print(json.dumps({"episode": ep, "seed": args.seed+ep,
                               "steps": step, "success": success[-1],
                               "meta_decisions": sum(d["episode"] == ep for d in decisions)}), flush=True)
@@ -359,6 +376,8 @@ def main():
     ap.add_argument("--data", default="outputs/medium_action/paired_chunks.npz")
     ap.add_argument("--checkpoint", default="outputs/medium_action/meta_action_adapter.pt")
     ap.add_argument("--decision-log", default="outputs/medium_action/decisions.jsonl")
+    ap.add_argument("--video-out", default="outputs/medium_action/nav.mp4",
+                    help="Save first success and failure; empty string disables video")
     ap.add_argument("--max-pairs", type=int, default=600)
     ap.add_argument("--max-valid", type=int, default=60)
     ap.add_argument("--epochs", type=int, default=3)
