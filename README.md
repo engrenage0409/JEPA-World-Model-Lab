@@ -1,6 +1,21 @@
 # JEPA World Model Lab — Masked Feature Prediction + Action-Conditioned Dynamics
 
-A **lightweight, educational JEPA-inspired World Model** for experimentation with a modest GPU (e.g. RTX 5060 8GB). Reuses `world-model-lab` CarRacing-v3 episodes. **No pretrained JEPA 2 weights or trained experiment results included.**
+A **lightweight, educational JEPA-inspired World Model** for experimentation with a modest GPU (e.g. RTX 5060 8GB). Reuses `world-model-lab` CarRacing-v3 episodes. **No pretrained JEPA 2 weights or locally trained weight files included.** Reproduction results from a separate upstream Mini-JEPA track are documented below.
+
+## Recent experiments: Mini-JEPA robotics (November 2026)
+
+An **independent reproduction track** using upstream [Mini-JEPA](https://github.com/WilliamZhang20/Mini-JEPA), not the educational CarRacing code in this repository:
+
+- **FetchReach-v4:** 10,000 MuJoCo interactions; 2,000 CUDA training steps on RTX 5060 8GB, state-based action-conditioned latent predictor and Gradient MPC.
+- **50-episode joint ablation:** lightweight MPC without smoothing **94% (47/50)**, with action penalties and smoothing **96% (48/50)**; mean action delta **0.8083 → 0.1893** (−76.6%); mean final goal distance **0.04286 → 0.01942** (−54.7%).
+- **Performance:** 50-episode evaluation **76.51 s** without smoothing vs **85.58 s** with smoothing. These are not evidence that smoothing accelerates inference.
+- Earlier **PointMaze Medium** work: reported 45/50 (90%) self-trained evaluation; detailed checkpoints/logs not yet included here.
+
+**[Detailed FetchReach setup, commands, results and limitations](docs/mini-jepa-fetchreach-results.md)**
+
+The 34% initial MPC run and 96% tuned run also used different planning budgets; those results do **not** isolate the effect of smoothing. No pretrained weights, local checkpoint, log dump, or video are committed here.
+
+---
 
 ## Implemented vs planned
 
